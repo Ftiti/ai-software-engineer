@@ -31,17 +31,19 @@ Requirements: [uv](https://docs.astral.sh/uv/). uv installs Python 3.12 automati
 ```bash
 uv sync                           # install runtime and dev dependencies
 cp .env.example .env              # adjust provider and model
-ollama pull llama3.1:8b           # default local model
+ollama pull llama3.1:8b           # default local model (needs ~5.6 GiB free RAM)
 uv run pytest                     # run the test suite
 ```
 
-Hosted providers are optional extras:
+On a machine with less free memory, pull a smaller model (e.g. `ollama pull phi3`) and set `OLLAMA_MODEL=phi3:latest` in `.env`.
+
+Hosted providers (OpenAI, Gemini, Groq) are optional extras. `uv sync` installs all of them for development; a production install picks only the one it needs:
 
 ```bash
-uv sync --extra openai            # or: --extra gemini, --extra groq, --all-extras
+uv sync --no-dev --extra openai   # or: --extra gemini, --extra groq
 ```
 
-Try the agent end to end (needs the configured provider running, e.g. Ollama):
+Try the agent end to end. The reply is streamed token by token (needs the configured provider running, e.g. Ollama):
 
 ```bash
 uv run python scripts/test_agent.py                         # "Explain what you can do."
@@ -93,13 +95,13 @@ Dependencies point **inward**: agents depend on abstractions (`LLMProvider`, Lan
 | `app/memory/` | Short-term memory (LangGraph checkpointer) and long-term memory (LangGraph store). |
 | `app/rag/` | Codebase indexing, chunking and retrieval. |
 | `app/prompts/` | Prompt templates, versioned separately from code. |
-| `app/models/` | Shared Pydantic domain models: graph state, plans, task results. |
+| `app/models/` | Shared Pydantic domain models, e.g. plans and task results (planned). |
 | `app/utils/` | Small helpers with no dependencies. |
 
 ### Agent engine (Sprint 1)
 
 ```
-user ──► graph.invoke({"messages": [HumanMessage]})
+user ──► graph.invoke / graph.stream({"messages": [HumanMessage]})
           │
         START
           │
@@ -117,6 +119,7 @@ user ──► graph.invoke({"messages": [HumanMessage]})
 - The system prompt is added on each model call and never stored in state, so agents sharing one history keep their own instructions.
 - Each agent reply carries `AIMessage.name`, so a shared multi-agent history stays attributable.
 - Nodes support both `invoke` and `ainvoke` natively.
+- `graph.stream(..., stream_mode="messages")` yields LLM tokens as they are generated, although nodes call `invoke`: LangGraph captures them through callbacks.
 
 ### Design rules
 
@@ -130,7 +133,7 @@ user ──► graph.invoke({"messages": [HumanMessage]})
 
 ## Configuration
 
-All settings are environment variables (see [.env.example](.env.example)):
+All settings are environment variables (see [.env.example](.env.example)). Precedence: real environment variable > `.env` file > default in [settings.py](app/config/settings.py). Put only what you change, and every secret, in `.env`; it is git-ignored.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -161,9 +164,9 @@ MCP is the **main way to add capabilities**. Built-in local tools cover only the
 
 The graph is designed so that going from one agent to several only adds nodes; existing code does not change.
 
-1. **Single agent (Sprints 1–2).** One ReAct-style agent node and one tool node in a LangGraph `StateGraph`. The supervisor package holds this agent.
+1. **Single agent (Sprints 1–2).** One agent node (`BaseAgent` from `agents/base/`) and, from Sprint 2, one tool node in a LangGraph `StateGraph`.
 2. **Plan and execute (Sprint 3).** `planner.py` splits a request into steps, and `router.py` loops through the steps and stops when a step fails.
-3. **Supervisor and specialists (Sprint 4+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, model (via `chat_model(model=...)`) and tool set. Agents communicate only through shared graph state defined in `app/models/`.
+3. **Supervisor and specialists (Sprint 4+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, model (via `chat_model(model=...)`) and tool set. Agents communicate only through the shared graph state (`app/orchestration/state.py`); each reply is tagged with the agent's name.
 4. **Review loops.** Tester and reviewer findings send work back to the coder, with a limit on iterations and human-in-the-loop interrupts before destructive actions.
 
 ---
@@ -186,7 +189,7 @@ The graph is designed so that going from one agent to several only adds nodes; e
 
 ```
 app/          application package (see Architecture)
-tests/        pytest suite (unit/ for now)
+tests/        pytest suite (unit/ + graph tests)
 scripts/      developer and maintenance scripts
 docs/         design notes and ADRs
 docker/       container build files
