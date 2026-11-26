@@ -3,8 +3,6 @@
 import sys
 from pathlib import Path
 
-import pytest
-
 from app.container import build_tool_manager
 from app.providers.mcp import MCPServerRegistry, SessionMCPClient, StdioTransport
 from app.tools import ToolRequest
@@ -80,7 +78,14 @@ async def test_full_pipeline_with_local_and_mcp_tools() -> None:
     assert not failed.ok and "nope" in (failed.error or "")
 
 
-@pytest.mark.parametrize("missing", ["absent.json"])
-async def test_build_tool_manager_without_mcp_config(tmp_path: Path, missing: str) -> None:
-    manager = await build_tool_manager(make_settings(mcp_config_path=tmp_path / missing))
-    assert manager.list_tools() == []
+async def test_default_tool_manager_has_capability_tools_and_no_mcp_without_config(tmp_path: Path) -> None:
+    settings = make_settings(mcp_config_path=tmp_path / "absent.json", fs_workspace_root=tmp_path)
+    manager = await build_tool_manager(settings)
+    assert [s.name for s in manager.list_tools()] == [
+        "create_file",
+        "delete_file",
+        "list_files",
+        "read_file",
+        "write_file",
+    ]
+    assert {s.source for s in manager.list_tools()} == {"local"}

@@ -1,7 +1,7 @@
 """Composition root: the one place where the application's objects are created and wired.
 
     Settings -> create_llm_provider -> LLMProvider -> BaseAgent -> build_graph -> graph
-    Settings -> local tools + MCP tools -> ToolRegistry -> ToolManager
+    Settings -> capabilities (filesystem, ...) + MCP tools -> ToolRegistry -> ToolManager
 
 Every other module receives its collaborators instead of building them, so swapping a
 provider or adding a capability (tools, MCP servers, agents) only changes this module.
@@ -10,6 +10,8 @@ provider or adding a capability (tools, MCP servers, agents) only changes this m
 from typing import Any
 
 from app.agents.base import BaseAgent
+from app.capabilities import Capability
+from app.capabilities.filesystem import build_filesystem_capability
 from app.config import Settings, get_settings
 from app.orchestration import AgentGraph, build_graph
 from app.providers.llm import LLMProvider, create_llm_provider
@@ -28,9 +30,14 @@ def build_application(settings: Settings | None = None) -> AgentGraph:
     return build_graph(build_agent(settings))
 
 
+def build_capabilities(settings: Settings) -> list[Capability]:
+    """Capabilities offered to agents. Each new capability is added to this list."""
+    return [build_filesystem_capability(settings)]
+
+
 def build_local_tools(settings: Settings) -> list[BaseTool[Any]]:
-    """Local tools offered to agents. Each capability sprint registers its tools here."""
-    return []
+    """Tools of every capability."""
+    return [tool for capability in build_capabilities(settings) for tool in capability.tools]
 
 
 async def build_tool_manager(

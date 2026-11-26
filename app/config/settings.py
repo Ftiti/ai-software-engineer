@@ -48,6 +48,36 @@ class Settings(BaseSettings):
     # Tools
     tool_timeout: float | None = Field(default=60.0, gt=0)  # seconds per tool call; None = no limit
 
+    # Filesystem capability. Patterns are matched against each path component (fnmatch).
+    fs_workspace_root: Path = Path(".")  # the only directory tools may touch
+    fs_read_only: bool = False
+    fs_max_read_bytes: int = Field(default=1_048_576, gt=0)
+    fs_max_write_bytes: int = Field(default=1_048_576, gt=0)
+    fs_max_list_entries: int = Field(default=1000, gt=0)
+    # No access at all (secrets).
+    fs_denied_patterns: list[str] = [
+        ".env",
+        ".env.local",
+        ".env.*.local",
+        "*.pem",
+        "*.key",
+        "id_rsa*",
+        "id_ed25519*",
+    ]
+    # Readable but never modified.
+    fs_protected_patterns: list[str] = [".git"]
+    # Skipped by recursive listings (still listable explicitly).
+    fs_ignored_patterns: list[str] = [
+        ".git",
+        ".venv",
+        ".venv-*",
+        "node_modules",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+    ]
+
     # MCP
     mcp_config_path: Path = Path("mcp_servers.json")
 

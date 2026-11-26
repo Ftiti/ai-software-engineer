@@ -9,7 +9,7 @@ It is built on:
 - **Ollama** as the default local LLM, with OpenAI, Gemini and Groq available
 - **MCP (Model Context Protocol)** as the main way to add tools
 
-> **Status: Sprint 3.** The LangGraph engine runs end to end on a provider-independent LLM layer (Ollama, OpenAI, Gemini, Groq), and the tool system (registry, manager, local and MCP adapters, real MCP client) is in place. Tools are not yet connected to the agent graph; no business tools, memory or multi-agent yet.
+> **Status: Sprint 4.** The LangGraph engine runs end to end on a provider-independent LLM layer (Ollama, OpenAI, Gemini, Groq). The tool system (registry, manager, local and MCP adapters, real MCP client) carries the first capability: safe filesystem access. Tools are not yet connected to the agent graph; no git, terminal, memory or multi-agent yet.
 
 ---
 
@@ -50,10 +50,10 @@ uv run python scripts/test_agent.py                         # "Explain what you 
 uv run python scripts/test_agent.py "Review this design..."  # custom prompt
 ```
 
-Try the tool pipeline (the demo `echo` tool plus the tools of any MCP server in `MCP_CONFIG_PATH`):
+Try the tool pipeline on this project (filesystem tools plus the tools of any MCP server in `MCP_CONFIG_PATH`; only reads, including requests the safety rules refuse):
 
 ```bash
-uv run python scripts/test_tools.py "Hello"
+uv run python scripts/test_tools.py
 ```
 
 Quality checks:
@@ -92,11 +92,13 @@ Dependencies point **inward**: agents depend on abstractions (`LLMProvider`, Lan
 |---|---|
 | `app/config/` | Typed settings (`pydantic-settings`) loaded from the environment and `.env`. The only place that reads environment variables. |
 | `app/providers/llm/` | `LLMProvider` abstraction (`invoke`, `stream`, `model_info`) plus Ollama, OpenAI, Gemini and Groq providers. `create_llm_provider()` picks one from `LLM_PROVIDER`. See [LLM providers](#llm-providers). |
-| `app/container.py` | Composition root: the only place that creates the provider, the agent, the graph and the tool manager. |
+| `app/container.py` | Composition root: the only place that creates the provider, the agent, the graph, the capabilities and the tool manager. |
+| `app/capabilities/` | Domain features exposed to agents as tools plus usage instructions. `filesystem/` is the first. See [Filesystem capability](#filesystem-capability). |
+| `app/providers/filesystem/` | The only code that touches the operating system's filesystem. |
 | `app/providers/mcp/` | MCP client side: `transport.py` (stdio, HTTP, SSE, WebSocket), `config.py` (the `mcpServers` file), `registry.py` (known servers), `client.py` (`connect` / `list_tools` / `execute_tool`). |
 | `app/providers/embeddings/`, `vectorstore/` | Embedding and vector store backends for RAG (planned). |
-| `app/services/` | Side-effecting operations (filesystem, git, terminal, project detection). No LLM code. |
-| `app/tools/` | Tool system: `interfaces.py` (contracts), `base.py` (`BaseTool`), `registry.py`, `manager.py`, `adapters/` (local, MCP) and `local/` (tool implementations). See [Tool system](#tool-system). |
+| `app/services/` | Reserved for future side-effecting services (git, terminal, project detection). No LLM code. |
+| `app/tools/` | Tool system: `interfaces.py` (contracts), `base.py` (`BaseTool`), `registry.py`, `manager.py`, `adapters/` (local, MCP) and `local/echo.py` (demo tool). See [Tool system](#tool-system). |
 | `app/agents/` | One package per agent role. `base/` holds `BaseAgent` (system prompt + injected chat model) and the shared prompt; specialised agents extend it. |
 | `app/orchestration/` | LangGraph engine: `state.py` (graph state), `nodes.py` (node factories), `router.py` (conditional edges), `graph.py` (wiring + composition root), `planner.py` (planned). |
 | `app/memory/` | Short-term memory (LangGraph checkpointer) and long-term memory (LangGraph store). |
@@ -134,6 +136,7 @@ user ──► graph.invoke / graph.stream({"messages": [HumanMessage]})
 - **Hosted vendor packages are optional extras** and are imported lazily, so an Ollama-only install never loads them.
 - **All tool calls go through `ToolManager`.** Local and MCP tools share the `ToolAdapter` interface, so callers cannot tell them apart. The tool system does not depend on LangGraph.
 - **Services hold no LLM logic** and can be tested without a model.
+- **Only `app/providers/filesystem/` touches the OS filesystem** (`os`, `shutil`, `tempfile`...). Enforced by `tests/unit/test_architecture.py`.
 - **Settings are injected.** Constructors take a `Settings` object, which keeps tests hermetic.
 
 ---
@@ -153,6 +156,13 @@ All settings are environment variables (see [.env.example](.env.example)). Prece
 | `GOOGLE_API_KEY` / `GEMINI_MODEL` / `GEMINI_TEMPERATURE` | – / `gemini-2.0-flash` / unset | key checked only when Gemini is used |
 | `GROQ_API_KEY` / `GROQ_MODEL` / `GROQ_TEMPERATURE` | – / `llama-3.1-8b-instant` / unset | key checked only when Groq is used |
 | `TOOL_TIMEOUT` | `60` | Seconds per tool call |
+| `FS_WORKSPACE_ROOT` | `.` | The only directory filesystem tools may access |
+| `FS_READ_ONLY` | `false` | Refuse every modification |
+| `FS_MAX_READ_BYTES` / `FS_MAX_WRITE_BYTES` | `1048576` | Size limits per file |
+| `FS_MAX_LIST_ENTRIES` | `1000` | Entries returned by one listing |
+| `FS_DENIED_PATTERNS` | `[".env", ".env.local", ".env.*.local", "*.pem", "*.key", "id_rsa*", "id_ed25519*"]` | No access at all, not even listing (JSON list) |
+| `FS_PROTECTED_PATTERNS` | `[".git"]` | Readable, never modified |
+| `FS_IGNORED_PATTERNS` | `[".git", ".venv", "node_modules", caches...]` | Skipped by recursive listings |
 | `MCP_CONFIG_PATH` | `mcp_servers.json` | A missing file means no MCP servers |
 
 ---
@@ -243,25 +253,58 @@ No code changes. The same graph, agent and prompts now run on Groq. To try a pro
 | Local adapter | `tools/adapters/local.py` | Validates arguments against the tool's input model, then runs it |
 | MCP adapter | `tools/adapters/mcp.py` | Exposes an MCP tool as `<server>_<tool>` and forwards execution to the MCP client |
 
-**Adding a local tool** means one new class, then one line in `build_local_tools()` in `app/container.py`:
-
-```python
-class ReadFileInput(BaseModel):
-    path: str
-
-class ReadFileTool(BaseTool[ReadFileInput]):
-    name = "read_file"
-    description = "Read a UTF-8 text file from the workspace."
-    input_model = ReadFileInput
-
-    def __init__(self, files: FileService) -> None:   # dependencies are injected
-        self._files = files
-
-    async def execute(self, params: ReadFileInput) -> str:
-        return self._files.read_text(params.path)
-```
+**Adding tools** means adding a capability (see [Filesystem capability](#filesystem-capability)): its tools subclass `BaseTool`, receive their service through the constructor, and the capability is listed once in `build_capabilities()` in `app/container.py`. Nothing in the tool system changes.
 
 `app/tools/local/echo.py` is a demonstration tool used by tests and `scripts/test_tools.py`; the application does not register it.
+
+---
+
+## Filesystem capability
+
+The first capability: lets the agent inspect and edit the project, safely. Tools: `list_files`, `read_file`, `write_file`, `create_file`, `delete_file`. The service also offers `create_directory`, `move_file` and `copy_file` for future capabilities.
+
+```
+ ToolManager ─► LocalToolAdapter ─► Filesystem tool          capabilities/filesystem/tool.py
+                                    │  input model = request schema (schemas.py)
+                                    │  runs the service in a worker thread
+                                    │  FilesystemError ─► ToolExecutionError
+                                    ▼
+                             FilesystemService              capabilities/filesystem/service.py
+                                    │  business logic: listing, recursion, text decoding,
+                                    │  create vs overwrite, OS error translation
+                         ┌──────────┴───────────┐
+                         ▼                      ▼
+                  PathValidator          FilesystemProvider  providers/filesystem/
+                  (validator.py)         (base.py / local.py)
+                  all safety rules       the ONLY code touching the OS:
+                  in one place           stat, scandir, atomic write, move, copy
+                                                │
+                                                ▼
+                                         Operating system
+```
+
+| Layer | File | Responsibility |
+|---|---|---|
+| Tools | `capabilities/filesystem/tool.py` | One small class per tool, mapping its input to one service call |
+| Schemas | `capabilities/filesystem/schemas.py` | Typed requests (also the tools' JSON Schemas) and responses |
+| Service | `capabilities/filesystem/service.py` | Business logic. Never touches the OS or builds paths itself |
+| Validator | `capabilities/filesystem/validator.py` | Every safety rule, plus existence, type and size checks |
+| Exceptions | `capabilities/filesystem/exceptions.py` | `FileNotFound`, `AccessDenied`, `InvalidPath`, `FileTooLarge`... with LLM-readable messages |
+| Prompt | `capabilities/filesystem/prompts.py` | How the agent should use the tools (inspect first, never guess, read before editing) |
+| Assembly | `capabilities/filesystem/capability.py` | provider ─► validator ─► service ─► tools, returned as a `Capability` |
+| Provider | `providers/filesystem/` | `FilesystemProvider` interface and `LocalFilesystemProvider` |
+
+### Safety model
+
+Every path an LLM sends goes through `PathValidator.resolve()` before anything touches the disk:
+
+1. **Well-formed**: not empty, no NUL byte.
+2. **Confined to the workspace**: the *real* path (``..`` collapsed, symlinks followed) must be inside `FS_WORKSPACE_ROOT`. `../../etc/passwd`, absolute paths elsewhere and symlinks pointing outside are refused.
+3. **Secrets are invisible**: paths with a component matching `FS_DENIED_PATTERNS` cannot be read, written or listed.
+4. **Operation allowed**: modifications are refused in read-only mode, on `FS_PROTECTED_PATTERNS` (`.git`) and on the workspace root.
+5. **Limits**: file size for reads and writes, entry count for listings; binary and non-UTF-8 files are refused as text.
+
+Writes are atomic (temporary file + rename, permissions kept), so an interrupted write never leaves a half-written file. Every refusal is a normal tool error the LLM can read and react to.
 
 ---
 
@@ -282,9 +325,9 @@ MCP is the **main way to add capabilities**. Built-in local tools cover only the
 
 The graph is designed so that going from one agent to several only adds nodes; existing code does not change.
 
-1. **Single agent (Sprints 1–5).** One agent node (`BaseAgent` from `agents/base/`) and, from Sprint 5, a tool node that calls `ToolManager`.
-2. **Plan and execute (Sprint 6).** `planner.py` splits a request into steps, and `router.py` loops through the steps and stops when a step fails.
-3. **Supervisor and specialists (Sprint 7+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, provider or model and tool set. Agents communicate only through the shared graph state (`app/orchestration/state.py`); each reply is tagged with the agent's name.
+1. **Single agent (Sprints 1–6).** One agent node (`BaseAgent` from `agents/base/`) and, from Sprint 6, a tool node that calls `ToolManager`.
+2. **Plan and execute (Sprint 7).** `planner.py` splits a request into steps, and `router.py` loops through the steps and stops when a step fails.
+3. **Supervisor and specialists (Sprint 8+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, provider or model and tool set. Agents communicate only through the shared graph state (`app/orchestration/state.py`); each reply is tagged with the agent's name.
 4. **Review loops.** Tester and reviewer findings send work back to the coder, with a limit on iterations and human-in-the-loop interrupts before destructive actions.
 
 ---
@@ -297,12 +340,13 @@ The graph is designed so that going from one agent to several only adds nodes; e
 | **1** ✅ | LangGraph engine: graph state, base agent, agent node, router foundation, end-to-end script |
 | **2** ✅ | LLM provider layer: `invoke`/`stream`/`model_info` abstraction, per-provider settings, timeout, factory registry, dependency injection via `app/container.py` |
 | **3** ✅ | Tool system: `BaseTool`, registry, manager, local and MCP adapters, MCP transports, server registry and client (`connect` / `list_tools` / `execute_tool`) |
-| **4** | Filesystem capability: sandboxed file service and `read_file` / `write_file` / `list_dir` / `search` tools |
-| **5** | Agent tool loop: tools bound to the LLM, tool node calling `ToolManager`, `tools` route; git and terminal capabilities |
-| **6** | Planner and router; checkpointing (short-term memory) and resumable sessions |
-| **7** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |
-| **8** | RAG over the workspace (embeddings, vector store, code-aware chunking) |
-| **9** | Long-term memory, evaluation harness, Docker packaging, observability |
+| **4** ✅ | Filesystem capability: provider, validator (workspace confinement, secrets, protection, limits), service, 5 tools, usage prompt |
+| **5** | Code intelligence capability: project structure, symbols and search, built on the filesystem service |
+| **6** | Agent tool loop: tools bound to the LLM, tool node calling `ToolManager`, capability prompts in the system prompt; git and terminal capabilities |
+| **7** | Planner and router; checkpointing (short-term memory) and resumable sessions |
+| **8** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |
+| **9** | RAG over the workspace (embeddings, vector store, code-aware chunking) |
+| **10** | Long-term memory, evaluation harness, Docker packaging, observability |
 
 ---
 

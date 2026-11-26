@@ -1,47 +1,51 @@
-"""Manual check of the tool pipeline: ToolRequest -> ToolManager -> registry -> adapter -> result.
+"""Manual check of the tool pipeline on the real workspace (FS_WORKSPACE_ROOT, default: here).
 
-Registers the demo ``echo`` tool plus the tools of every MCP server in MCP_CONFIG_PATH, lists
-them, then runs a few requests (including failing ones) and prints the results.
+Builds the tool manager exactly like the application (capability tools + MCP tools), lists
+the tools, then runs read-only requests, including ones the safety rules must refuse.
 
 Usage:
     uv run python scripts/test_tools.py
-    uv run python scripts/test_tools.py "Bonjour"
 """
 
-import argparse
 import asyncio
+import json
 import sys
 
 from app.config import get_settings
 from app.container import build_tool_manager
 from app.tools import ToolRequest
-from app.tools.local.echo import EchoTool
+
+DEMO_REQUESTS = [
+    ToolRequest(tool_name="list_files", arguments={"path": "."}),
+    ToolRequest(tool_name="read_file", arguments={"path": "pyproject.toml"}),
+    ToolRequest(tool_name="read_file", arguments={"path": ".env"}),  # secret: refused
+    ToolRequest(tool_name="read_file", arguments={"path": "../../etc/passwd"}),  # outside: refused
+    ToolRequest(tool_name="write_file", arguments={"path": ".git/HEAD", "content": "x"}),  # protected
+    ToolRequest(tool_name="read_file", arguments={"path": "does/not/exist.py"}),
+]
 
 
-async def main(text: str) -> int:
+def summarize(output: object, limit: int = 160) -> str:
+    text = json.dumps(output, ensure_ascii=False)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+async def main() -> int:
     settings = get_settings()
-    manager = await build_tool_manager(settings, local_tools=[EchoTool()])
+    manager = await build_tool_manager(settings)
 
-    print(f"MCP config: {settings.mcp_config_path}")
+    print(f"Workspace: {settings.fs_workspace_root.resolve()}  (read-only: {settings.fs_read_only})")
     print("Registered tools:")
     for spec in manager.list_tools():
-        print(f"  [{spec.source:5}] {spec.name:30} {spec.description}")
+        print(f"  [{spec.source:5}] {spec.name:14} {spec.description}")
 
-    requests = [
-        ToolRequest(tool_name="echo", arguments={"text": text}, call_id="1"),
-        ToolRequest(tool_name="echo", arguments={"wrong": text}, call_id="2"),
-        ToolRequest(tool_name="does_not_exist", call_id="3"),
-    ]
     print("\nResults:")
-    for result in await manager.execute_many(requests):
-        status = f"ok    -> {result.output!r}" if result.ok else f"error -> {result.error}"
-        print(f"  #{result.call_id} {result.tool_name:16} {status}")
+    for request, result in zip(DEMO_REQUESTS, await manager.execute_many(DEMO_REQUESTS), strict=True):
+        target = request.arguments.get("path")
+        status = f"ok    {summarize(result.output)}" if result.ok else f"ERROR {result.error}"
+        print(f"  {request.tool_name}({target!r})\n      {status}")
     return 0
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument("text", nargs="?", default="Hello")
-    sys.exit(asyncio.run(main(parser.parse_args().text)))
+    sys.exit(asyncio.run(main()))
