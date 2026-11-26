@@ -9,7 +9,7 @@ It is built on:
 - **Ollama** as the default local LLM, with OpenAI, Gemini and Groq available
 - **MCP (Model Context Protocol)** as the main way to add tools
 
-> **Status: Sprint 0.** The architecture is in place: configuration, LLM provider abstraction and MCP client wiring. No agents or tools exist yet.
+> **Status: Sprint 1.** The LangGraph engine runs: a user message goes through the graph to the configured LLM and back. No tools, MCP servers, memory or multi-agent yet.
 
 ---
 
@@ -39,6 +39,13 @@ Hosted providers are optional extras:
 
 ```bash
 uv sync --extra openai            # or: --extra gemini, --extra groq, --all-extras
+```
+
+Try the agent end to end (needs the configured provider running, e.g. Ollama):
+
+```bash
+uv run python scripts/test_agent.py                         # "Explain what you can do."
+uv run python scripts/test_agent.py "Review this design..."  # custom prompt
 ```
 
 Quality checks:
@@ -81,13 +88,35 @@ Dependencies point **inward**: agents depend on abstractions (`LLMProvider`, Lan
 | `app/providers/embeddings/`, `vectorstore/` | Embedding and vector store backends for RAG (planned). |
 | `app/services/` | Side-effecting operations (filesystem, git, terminal, project detection). No LLM code. |
 | `app/tools/` | What agents can call. `interfaces/` holds the shared contracts, `local/` wraps services, `mcp/` adapts MCP tools. |
-| `app/agents/` | One package per agent role. Each agent holds its node logic and uses the tools and models it is given. |
-| `app/orchestration/` | Builds the LangGraph graph (`graph.py`), conditional edges (`router.py`) and task decomposition (`planner.py`). |
+| `app/agents/` | One package per agent role. `base/` holds `BaseAgent` (system prompt + injected chat model) and the shared prompt; specialised agents extend it. |
+| `app/orchestration/` | LangGraph engine: `state.py` (graph state), `nodes.py` (node factories), `router.py` (conditional edges), `graph.py` (wiring + composition root), `planner.py` (planned). |
 | `app/memory/` | Short-term memory (LangGraph checkpointer) and long-term memory (LangGraph store). |
 | `app/rag/` | Codebase indexing, chunking and retrieval. |
 | `app/prompts/` | Prompt templates, versioned separately from code. |
 | `app/models/` | Shared Pydantic domain models: graph state, plans, task results. |
 | `app/utils/` | Small helpers with no dependencies. |
+
+### Agent engine (Sprint 1)
+
+```
+user ──► graph.invoke({"messages": [HumanMessage]})
+          │
+        START
+          │
+        agent  ── create_agent_node(BaseAgent) ── BaseAgent.invoke(history)
+          │                                         │  [SystemMessage, *history]
+          │                                         ▼
+          │                                       BaseChatModel  ◄── create_llm_provider(settings)
+          │                                         │
+          │      {"messages": [AIMessage(name=…)]} ◄┘   (appended by add_messages)
+          │
+   route_after_agent ──► END   (Sprint 2 adds: ──► tools ──► agent)
+```
+
+- `build_graph(agent)` only wires nodes; `create_graph(settings)` is the single composition root that picks the provider.
+- The system prompt is added on each model call and never stored in state, so agents sharing one history keep their own instructions.
+- Each agent reply carries `AIMessage.name`, so a shared multi-agent history stays attributable.
+- Nodes support both `invoke` and `ainvoke` natively.
 
 ### Design rules
 
@@ -144,8 +173,8 @@ The graph is designed so that going from one agent to several only adds nodes; e
 | Sprint | Goal |
 |---|---|
 | **0** ✅ | Architecture, configuration, LLM provider abstraction, MCP client wiring, tests |
-| **1** | LangGraph single-agent loop: graph state, chat node, tool node, CLI entry point |
-| **2** | Local tools on top of the services layer (read/write/search files, git, terminal) with sandboxing; first MCP servers enabled |
+| **1** ✅ | LangGraph engine: graph state, base agent, agent node, router foundation, end-to-end script |
+| **2** | Tool node and `tools` route; local tools on the services layer (files, git, terminal) with sandboxing; first MCP servers enabled |
 | **3** | Planner and router; checkpointing (short-term memory) and resumable sessions |
 | **4** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |
 | **5** | RAG over the workspace (embeddings, vector store, code-aware chunking) |

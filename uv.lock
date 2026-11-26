@@ -42,6 +42,7 @@ openai = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "ai-software-engineer", extra = ["gemini", "groq", "openai"] },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -68,6 +69,7 @@ provides-extras = ["openai", "gemini", "groq"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "ai-software-engineer", extras = ["gemini", "groq", "openai"], editable = "." },
     { name = "mypy", specifier = ">=2.4.1" },
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "pytest-asyncio", specifier = ">=1.5.0" },

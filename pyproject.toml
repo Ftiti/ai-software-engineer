@@ -54,8 +54,12 @@ strict = true
 packages = ["app"]
 plugins = ["pydantic.mypy"]
 
+[tool.uv.sources]
+ai-software-engineer = { workspace = true }
+
 [dependency-groups]
 dev = [
+    "ai-software-engineer[gemini,groq,openai]",
     "mypy>=2.4.1",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.5.0",
