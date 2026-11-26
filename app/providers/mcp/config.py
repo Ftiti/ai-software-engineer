@@ -1,7 +1,7 @@
-"""MCP server configuration models.
+"""Loading of the MCP servers file.
 
-The file format follows the ``mcpServers`` convention used by Claude Desktop, Claude Code
-and Cursor, so existing server definitions can be reused as-is::
+The format follows the ``mcpServers`` convention used by Claude Desktop, Claude Code and
+Cursor, so existing server definitions can be reused as-is::
 
     {
       "mcpServers": {
@@ -10,47 +10,14 @@ and Cursor, so existing server definitions can be reused as-is::
       }
     }
 
-When ``transport`` is omitted it is inferred: ``stdio`` if ``command`` is set, otherwise
-``streamable_http``.
+Transports are described in :mod:`app.providers.mcp.transport`.
 """
 
 from pathlib import Path
-from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-
-def _infer_transport(data: Any) -> Any:
-    if isinstance(data, dict) and "transport" not in data:
-        return {**data, "transport": "stdio" if "command" in data else "streamable_http"}
-    return data
-
-
-class _ServerBase(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = True
-
-
-class StdioServerConfig(_ServerBase):
-    transport: Literal["stdio"]
-    command: str
-    args: list[str] = Field(default_factory=list)
-    env: dict[str, str] | None = None
-    cwd: Path | None = None
-
-
-class HttpServerConfig(_ServerBase):
-    transport: Literal["streamable_http", "sse"]
-    url: str
-    headers: dict[str, str] | None = None
-
-
-MCPServerConfig = Annotated[
-    StdioServerConfig | HttpServerConfig,
-    Field(discriminator="transport"),
-    BeforeValidator(_infer_transport),
-]
+from app.providers.mcp.transport import MCPServerConfig
 
 
 class MCPConfig(BaseModel):

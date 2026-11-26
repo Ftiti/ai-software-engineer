@@ -9,7 +9,7 @@ It is built on:
 - **Ollama** as the default local LLM, with OpenAI, Gemini and Groq available
 - **MCP (Model Context Protocol)** as the main way to add tools
 
-> **Status: Sprint 2.** The LangGraph engine runs end to end on a provider-independent LLM layer (Ollama, OpenAI, Gemini, Groq). No tools, MCP servers, memory or multi-agent yet.
+> **Status: Sprint 3.** The LangGraph engine runs end to end on a provider-independent LLM layer (Ollama, OpenAI, Gemini, Groq), and the tool system (registry, manager, local and MCP adapters, real MCP client) is in place. Tools are not yet connected to the agent graph; no business tools, memory or multi-agent yet.
 
 ---
 
@@ -50,6 +50,12 @@ uv run python scripts/test_agent.py                         # "Explain what you 
 uv run python scripts/test_agent.py "Review this design..."  # custom prompt
 ```
 
+Try the tool pipeline (the demo `echo` tool plus the tools of any MCP server in `MCP_CONFIG_PATH`):
+
+```bash
+uv run python scripts/test_tools.py "Hello"
+```
+
 Quality checks:
 
 ```bash
@@ -86,11 +92,11 @@ Dependencies point **inward**: agents depend on abstractions (`LLMProvider`, Lan
 |---|---|
 | `app/config/` | Typed settings (`pydantic-settings`) loaded from the environment and `.env`. The only place that reads environment variables. |
 | `app/providers/llm/` | `LLMProvider` abstraction (`invoke`, `stream`, `model_info`) plus Ollama, OpenAI, Gemini and Groq providers. `create_llm_provider()` picks one from `LLM_PROVIDER`. See [LLM providers](#llm-providers). |
-| `app/container.py` | Composition root: the only place that creates the provider, the agent and the graph. |
-| `app/providers/mcp/` | MCP server config (`mcpServers` JSON format), the server registry, and `MCPClient`, which turns MCP tools into LangChain tools. |
+| `app/container.py` | Composition root: the only place that creates the provider, the agent, the graph and the tool manager. |
+| `app/providers/mcp/` | MCP client side: `transport.py` (stdio, HTTP, SSE, WebSocket), `config.py` (the `mcpServers` file), `registry.py` (known servers), `client.py` (`connect` / `list_tools` / `execute_tool`). |
 | `app/providers/embeddings/`, `vectorstore/` | Embedding and vector store backends for RAG (planned). |
 | `app/services/` | Side-effecting operations (filesystem, git, terminal, project detection). No LLM code. |
-| `app/tools/` | What agents can call. `interfaces/` holds the shared contracts, `local/` wraps services, `mcp/` adapts MCP tools. |
+| `app/tools/` | Tool system: `interfaces.py` (contracts), `base.py` (`BaseTool`), `registry.py`, `manager.py`, `adapters/` (local, MCP) and `local/` (tool implementations). See [Tool system](#tool-system). |
 | `app/agents/` | One package per agent role. `base/` holds `BaseAgent` (system prompt + injected chat model) and the shared prompt; specialised agents extend it. |
 | `app/orchestration/` | LangGraph engine: `state.py` (graph state), `nodes.py` (node factories), `router.py` (conditional edges), `graph.py` (wiring + composition root), `planner.py` (planned). |
 | `app/memory/` | Short-term memory (LangGraph checkpointer) and long-term memory (LangGraph store). |
@@ -126,7 +132,7 @@ user ──► graph.invoke / graph.stream({"messages": [HumanMessage]})
 
 - **Nothing outside `providers/llm/` imports a vendor SDK.** Enforced by `tests/unit/test_architecture.py`.
 - **Hosted vendor packages are optional extras** and are imported lazily, so an Ollama-only install never loads them.
-- **Tools are LangChain `BaseTool`s.** Local and MCP tools look the same to an agent.
+- **All tool calls go through `ToolManager`.** Local and MCP tools share the `ToolAdapter` interface, so callers cannot tell them apart. The tool system does not depend on LangGraph.
 - **Services hold no LLM logic** and can be tested without a model.
 - **Settings are injected.** Constructors take a `Settings` object, which keeps tests hermetic.
 
@@ -146,6 +152,7 @@ All settings are environment variables (see [.env.example](.env.example)). Prece
 | `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_TEMPERATURE` | – / `gpt-4o-mini` / unset | key checked only when OpenAI is used |
 | `GOOGLE_API_KEY` / `GEMINI_MODEL` / `GEMINI_TEMPERATURE` | – / `gemini-2.0-flash` / unset | key checked only when Gemini is used |
 | `GROQ_API_KEY` / `GROQ_MODEL` / `GROQ_TEMPERATURE` | – / `llama-3.1-8b-instant` / unset | key checked only when Groq is used |
+| `TOOL_TIMEOUT` | `60` | Seconds per tool call |
 | `MCP_CONFIG_PATH` | `mcp_servers.json` | A missing file means no MCP servers |
 
 ---
@@ -198,13 +205,74 @@ No code changes. The same graph, agent and prompts now run on Groq. To try a pro
 
 ---
 
+## Tool system
+
+```
+            Agent / graph node / CLI
+                      │  ToolRequest(tool_name, arguments, call_id)
+                      ▼
+               ┌─────────────┐
+               │ ToolManager │  single entry point: lookup, timeout, error handling
+               └──────┬──────┘
+                      │ get(name)
+               ┌──────▼──────┐
+               │ToolRegistry │  name ─► ToolAdapter (filled by app/container.py)
+               └──────┬──────┘
+          ┌───────────┴────────────┐
+          ▼                        ▼
+ ┌──────────────────┐     ┌──────────────────┐
+ │ LocalToolAdapter │     │  MCPToolAdapter  │
+ │ validates input, │     │ forwards to the  │
+ │ runs BaseTool    │     │ MCP client       │
+ └────────┬─────────┘     └────────┬─────────┘
+          ▼                        ▼
+   BaseTool.execute()       MCPClient.execute_tool()
+   (in-process code)        ─► transport (stdio/HTTP/SSE/WS) ─► MCP server
+          │                        │
+          └──────────┬─────────────┘
+                     ▼
+        ToolResult(output | error, call_id)
+```
+
+| Piece | File | Responsibility |
+|---|---|---|
+| Contracts | `tools/interfaces.py` | `ToolSpec`, `ToolRequest`, `ToolResult`, `ToolAdapter`, error types |
+| `BaseTool` | `tools/base.py` | Base class for local tools: `name`, `description`, Pydantic `input_model` (validation + JSON Schema), `execute()` |
+| Registry | `tools/registry.py` | `register`, `unregister`, `get`, `list_specs`. Names are unique; agents never instantiate tools |
+| Manager | `tools/manager.py` | Runs a `ToolRequest` and always returns a `ToolResult`: unknown tool, invalid arguments, tool failure, timeout and crashes become error results the LLM can read. `execute_many` runs calls concurrently |
+| Local adapter | `tools/adapters/local.py` | Validates arguments against the tool's input model, then runs it |
+| MCP adapter | `tools/adapters/mcp.py` | Exposes an MCP tool as `<server>_<tool>` and forwards execution to the MCP client |
+
+**Adding a local tool** means one new class, then one line in `build_local_tools()` in `app/container.py`:
+
+```python
+class ReadFileInput(BaseModel):
+    path: str
+
+class ReadFileTool(BaseTool[ReadFileInput]):
+    name = "read_file"
+    description = "Read a UTF-8 text file from the workspace."
+    input_model = ReadFileInput
+
+    def __init__(self, files: FileService) -> None:   # dependencies are injected
+        self._files = files
+
+    async def execute(self, params: ReadFileInput) -> str:
+        return self._files.read_text(params.path)
+```
+
+`app/tools/local/echo.py` is a demonstration tool used by tests and `scripts/test_tools.py`; the application does not register it.
+
+---
+
 ## MCP strategy
 
 MCP is the **main way to add capabilities**. Built-in local tools cover only the essentials needed to work offline.
 
 - **Client first.** The agent is an MCP *client*. Servers are configured in `mcp_servers.json`, using the same `mcpServers` format as Claude Desktop, Claude Code and Cursor, so existing server definitions can be copied in. See [mcp_servers.example.json](mcp_servers.example.json).
-- **Transports.** `stdio` (inferred when `command` is set), `streamable_http` (inferred when `url` is set) and `sse` (set explicitly).
-- **Uniform tools.** `MCPClient` uses `langchain-mcp-adapters` to expose MCP tools as LangChain `BaseTool`s, prefixed with their server name to avoid collisions. Agents cannot tell MCP tools from local ones.
+- **Transports.** `stdio` (inferred when `command` is set), `streamable_http` (inferred when `url` is set), `sse` and `websocket` (set explicitly). Each is a model in `transport.py` with `to_connection()`; adding one does not touch the client.
+- **Client.** `SessionMCPClient` implements `connect()` (discover the tools of every enabled server), `list_tools()` and `execute_tool()`, opening one MCP session per operation. An unreachable server is logged and skipped (`failed_servers`); the others keep working. Tested against a real stdio MCP server (`tests/fixtures/echo_mcp_server.py`).
+- **Uniform tools.** `load_mcp_tools()` wraps each discovered tool in an `MCPToolAdapter` named `<server>_<tool>`, registered next to local tools. Callers cannot tell MCP tools from local ones.
 - **Per-server control.** Each server can be turned off with `"enabled": false`. Later sprints add per-agent tool allowlists, so for example the reviewer gets read-only tools.
 - **Server mode (later).** The agent's own services can be exposed as an MCP server so other clients can use them.
 
@@ -214,9 +282,9 @@ MCP is the **main way to add capabilities**. Built-in local tools cover only the
 
 The graph is designed so that going from one agent to several only adds nodes; existing code does not change.
 
-1. **Single agent (Sprints 1–3).** One agent node (`BaseAgent` from `agents/base/`) and, from Sprint 3, one tool node in a LangGraph `StateGraph`.
-2. **Plan and execute (Sprint 4).** `planner.py` splits a request into steps, and `router.py` loops through the steps and stops when a step fails.
-3. **Supervisor and specialists (Sprint 5+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, provider or model and tool set. Agents communicate only through the shared graph state (`app/orchestration/state.py`); each reply is tagged with the agent's name.
+1. **Single agent (Sprints 1–5).** One agent node (`BaseAgent` from `agents/base/`) and, from Sprint 5, a tool node that calls `ToolManager`.
+2. **Plan and execute (Sprint 6).** `planner.py` splits a request into steps, and `router.py` loops through the steps and stops when a step fails.
+3. **Supervisor and specialists (Sprint 7+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, provider or model and tool set. Agents communicate only through the shared graph state (`app/orchestration/state.py`); each reply is tagged with the agent's name.
 4. **Review loops.** Tester and reviewer findings send work back to the coder, with a limit on iterations and human-in-the-loop interrupts before destructive actions.
 
 ---
@@ -228,11 +296,13 @@ The graph is designed so that going from one agent to several only adds nodes; e
 | **0** ✅ | Architecture, configuration, LLM provider abstraction, MCP client wiring, tests |
 | **1** ✅ | LangGraph engine: graph state, base agent, agent node, router foundation, end-to-end script |
 | **2** ✅ | LLM provider layer: `invoke`/`stream`/`model_info` abstraction, per-provider settings, timeout, factory registry, dependency injection via `app/container.py` |
-| **3** | Tool system and MCP client: tool node and `tools` route; local tools on the services layer (files, git, terminal) with sandboxing; first MCP servers enabled |
-| **4** | Planner and router; checkpointing (short-term memory) and resumable sessions |
-| **5** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |
-| **6** | RAG over the workspace (embeddings, vector store, code-aware chunking) |
-| **7** | Long-term memory, evaluation harness, Docker packaging, observability |
+| **3** ✅ | Tool system: `BaseTool`, registry, manager, local and MCP adapters, MCP transports, server registry and client (`connect` / `list_tools` / `execute_tool`) |
+| **4** | Filesystem capability: sandboxed file service and `read_file` / `write_file` / `list_dir` / `search` tools |
+| **5** | Agent tool loop: tools bound to the LLM, tool node calling `ToolManager`, `tools` route; git and terminal capabilities |
+| **6** | Planner and router; checkpointing (short-term memory) and resumable sessions |
+| **7** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |
+| **8** | RAG over the workspace (embeddings, vector store, code-aware chunking) |
+| **9** | Long-term memory, evaluation harness, Docker packaging, observability |
 
 ---
 
@@ -240,7 +310,7 @@ The graph is designed so that going from one agent to several only adds nodes; e
 
 ```
 app/          application package (see Architecture)
-tests/        pytest suite (unit/ + graph tests)
+tests/        pytest suite: unit/, integration/ (real MCP server), fixtures/
 scripts/      developer and maintenance scripts
 docs/         design notes and ADRs
 docker/       container build files

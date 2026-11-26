@@ -1,31 +1,46 @@
-"""Registry of configured MCP servers."""
+"""Registry of known MCP servers (filesystem, git, databases, browsers, ...).
 
-from typing import Any
+Servers come from the MCP config file and can also be registered in code. The registry only
+knows *how to reach* each server; talking to them is the client's job.
+"""
 
 from app.config import Settings, get_settings
-from app.providers.mcp.config import MCPConfig, MCPServerConfig, StdioServerConfig
+from app.providers.mcp.config import MCPConfig
+from app.providers.mcp.transport import MCPServerConfig
+
+
+class MCPServerNotFoundError(KeyError):
+    pass
 
 
 class MCPServerRegistry:
-    """Holds MCP server definitions and exposes the enabled ones."""
+    def __init__(self, servers: dict[str, MCPServerConfig] | None = None) -> None:
+        self._servers: dict[str, MCPServerConfig] = dict(servers or {})
 
-    def __init__(self, config: MCPConfig) -> None:
-        self._servers = dict(config.servers)
+    @classmethod
+    def from_config(cls, config: MCPConfig) -> "MCPServerRegistry":
+        return cls(config.servers)
 
     @classmethod
     def from_settings(cls, settings: Settings | None = None) -> "MCPServerRegistry":
         settings = settings or get_settings()
-        return cls(MCPConfig.load(settings.mcp_config_path))
+        return cls.from_config(MCPConfig.load(settings.mcp_config_path))
+
+    def register(self, name: str, server: MCPServerConfig) -> None:
+        self._servers[name] = server
+
+    def unregister(self, name: str) -> None:
+        if self._servers.pop(name, None) is None:
+            raise MCPServerNotFoundError(name)
+
+    def get(self, name: str) -> MCPServerConfig:
+        try:
+            return self._servers[name]
+        except KeyError:
+            raise MCPServerNotFoundError(name) from None
+
+    def names(self) -> list[str]:
+        return sorted(self._servers)
 
     def enabled(self) -> dict[str, MCPServerConfig]:
-        return {name: server for name, server in self._servers.items() if server.enabled}
-
-    def to_connections(self) -> dict[str, Any]:
-        """Return enabled servers in the connection format expected by ``langchain-mcp-adapters``."""
-        connections: dict[str, Any] = {}
-        for name, server in self.enabled().items():
-            conn = server.model_dump(exclude={"enabled"}, exclude_none=True)
-            if isinstance(server, StdioServerConfig) and server.cwd is not None:
-                conn["cwd"] = str(server.cwd)
-            connections[name] = conn
-        return connections
+        return {name: server for name, server in sorted(self._servers.items()) if server.enabled}

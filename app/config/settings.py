@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     groq_model: str = "llama-3.1-8b-instant"
     groq_temperature: Temperature | None = None
 
+    # Tools
+    tool_timeout: float | None = Field(default=60.0, gt=0)  # seconds per tool call; None = no limit
+
     # MCP
     mcp_config_path: Path = Path("mcp_servers.json")
 

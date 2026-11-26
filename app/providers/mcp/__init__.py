@@ -1,14 +1,29 @@
 """Model Context Protocol (MCP) client integration."""
 
-from app.providers.mcp.client import MCPClient
-from app.providers.mcp.config import HttpServerConfig, MCPConfig, MCPServerConfig, StdioServerConfig
-from app.providers.mcp.registry import MCPServerRegistry
+from app.providers.mcp.client import MCPClient, MCPToolCallResult, MCPToolInfo, SessionMCPClient
+from app.providers.mcp.config import MCPConfig
+from app.providers.mcp.registry import MCPServerNotFoundError, MCPServerRegistry
+from app.providers.mcp.transport import (
+    HttpTransport,
+    MCPServerConfig,
+    MCPTransport,
+    StdioTransport,
+    TransportType,
+    WebSocketTransport,
+)
 
 __all__ = [
-    "HttpServerConfig",
+    "HttpTransport",
     "MCPClient",
     "MCPConfig",
     "MCPServerConfig",
+    "MCPServerNotFoundError",
     "MCPServerRegistry",
-    "StdioServerConfig",
+    "MCPToolCallResult",
+    "MCPToolInfo",
+    "MCPTransport",
+    "SessionMCPClient",
+    "StdioTransport",
+    "TransportType",
+    "WebSocketTransport",
 ]

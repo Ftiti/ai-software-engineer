@@ -11,7 +11,7 @@ from pydantic import Field
 from app.config import Settings, get_settings
 from app.providers.llm import LLMProvider, ModelInfo
 
-_CONFIG_PREFIXES = ("LLM_", "OLLAMA_", "OPENAI_", "GOOGLE_", "GEMINI_", "GROQ_", "MCP_")
+_CONFIG_PREFIXES = ("LLM_", "OLLAMA_", "OPENAI_", "GOOGLE_", "GEMINI_", "GROQ_", "MCP_", "TOOL_")
 
 
 @pytest.fixture(autouse=True)
