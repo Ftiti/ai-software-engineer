@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from app.capabilities.filesystem import FilesystemService, build_filesystem_capability
+from app.capabilities.filesystem import (
+    FilesystemService,
+    build_filesystem_capability,
+    build_filesystem_service,
+)
 from app.capabilities.filesystem.prompts import FILESYSTEM_PROMPT
 from app.capabilities.filesystem.tool import filesystem_tools
 from app.container import build_capabilities, build_local_tools
@@ -77,7 +81,9 @@ async def test_errors_become_readable_tool_results(
 
 
 def test_capability_bundles_tools_and_prompt(workspace: Path) -> None:
-    capability = build_filesystem_capability(make_settings(fs_workspace_root=workspace))
+    capability = build_filesystem_capability(
+        build_filesystem_service(make_settings(fs_workspace_root=workspace))
+    )
     assert capability.name == "filesystem"
     assert sorted(t.name for t in capability.tools) == TOOL_NAMES
     assert capability.prompt == FILESYSTEM_PROMPT
@@ -86,5 +92,5 @@ def test_capability_bundles_tools_and_prompt(workspace: Path) -> None:
 
 def test_container_registers_filesystem_tools_automatically(workspace: Path) -> None:
     settings = make_settings(fs_workspace_root=workspace)
-    assert [c.name for c in build_capabilities(settings)] == ["filesystem"]
-    assert sorted(t.name for t in build_local_tools(settings)) == TOOL_NAMES
+    assert build_capabilities(settings)[0].name == "filesystem"
+    assert set(TOOL_NAMES) <= {t.name for t in build_local_tools(settings)}

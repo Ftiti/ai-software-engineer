@@ -1,16 +1,14 @@
 """Filesystem tools: thin wrappers exposing :class:`FilesystemService` to the tool system.
 
-Each tool maps its input model to one service call. :class:`FilesystemTool` holds the shared
-plumbing: run the blocking service in a worker thread, turn capability errors into
-``ToolExecutionError`` (so the manager reports them to the LLM) and serialise the response.
+Each tool maps its input model to one service call; threading, error translation and
+serialisation come from :class:`app.capabilities.base.CapabilityTool`.
 """
 
-import asyncio
-from abc import abstractmethod
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from app.capabilities.base import CapabilityTool
 from app.capabilities.filesystem.exceptions import FilesystemError
 from app.capabilities.filesystem.schemas import (
     CreateFileRequest,
@@ -20,24 +18,16 @@ from app.capabilities.filesystem.schemas import (
     WriteFileRequest,
 )
 from app.capabilities.filesystem.service import FilesystemService
-from app.tools import BaseTool, ToolExecutionError
+from app.tools import BaseTool
 
 InputT = TypeVar("InputT", bound=BaseModel)
 
 
-class FilesystemTool(BaseTool[InputT]):
+class FilesystemTool(CapabilityTool[InputT]):
+    errors = (FilesystemError,)
+
     def __init__(self, service: FilesystemService) -> None:
         self._service = service
-
-    async def execute(self, params: InputT) -> dict[str, Any]:
-        try:
-            response = await asyncio.to_thread(self._run, params)
-        except FilesystemError as exc:
-            raise ToolExecutionError(str(exc)) from exc
-        return response.model_dump()
-
-    @abstractmethod
-    def _run(self, params: InputT) -> BaseModel: ...
 
 
 class ListFilesTool(FilesystemTool[ListDirectoryRequest]):

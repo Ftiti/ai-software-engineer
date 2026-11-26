@@ -54,12 +54,7 @@ class FilesystemService:
                 if len(entries) == limit:
                     return ListDirectoryResponse(path=directory.relative, entries=entries, truncated=True)
                 entries.append(_to_entry(child.relative, entry))
-                if (
-                    recursive
-                    and entry.is_dir
-                    and not entry.is_symlink
-                    and not self._validator.is_ignored(child.relative)
-                ):
+                if recursive and self._should_descend(child, entry):
                     pending.append(child)
         return ListDirectoryResponse(path=directory.relative, entries=entries)
 

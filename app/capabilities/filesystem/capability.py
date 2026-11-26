@@ -17,6 +17,6 @@ def build_filesystem_service(
     return FilesystemService(provider, validator)
 
 
-def build_filesystem_capability(settings: Settings, provider: FilesystemProvider | None = None) -> Capability:
-    service = build_filesystem_service(settings, provider)
+def build_filesystem_capability(service: FilesystemService) -> Capability:
+    """The filesystem tools around ``service`` (shared with capabilities that read the project)."""
     return Capability(name="filesystem", tools=filesystem_tools(service), prompt=FILESYSTEM_PROMPT)

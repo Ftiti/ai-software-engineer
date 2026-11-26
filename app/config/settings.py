@@ -78,6 +78,9 @@ class Settings(BaseSettings):
         ".ruff_cache",
     ]
 
+    # Code intelligence
+    code_max_results: int = Field(default=50, gt=0)  # cap on symbols/imports/references per query
+
     # MCP
     mcp_config_path: Path = Path("mcp_servers.json")
 

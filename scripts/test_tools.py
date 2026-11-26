@@ -1,7 +1,7 @@
 """Manual check of the tool pipeline on the real workspace (FS_WORKSPACE_ROOT, default: here).
 
 Builds the tool manager exactly like the application (capability tools + MCP tools), lists
-the tools, then runs read-only requests, including ones the safety rules must refuse.
+the tools, then runs read-only requests (files and code intelligence), including ones that must be refused.
 
 Usage:
     uv run python scripts/test_tools.py
@@ -22,6 +22,14 @@ DEMO_REQUESTS = [
     ToolRequest(tool_name="read_file", arguments={"path": "../../etc/passwd"}),  # outside: refused
     ToolRequest(tool_name="write_file", arguments={"path": ".git/HEAD", "content": "x"}),  # protected
     ToolRequest(tool_name="read_file", arguments={"path": "does/not/exist.py"}),
+    ToolRequest(tool_name="analyze_project", arguments={}),
+    ToolRequest(tool_name="find_class", arguments={"query": "ToolManager"}),
+    ToolRequest(
+        tool_name="find_definition", arguments={"name": "BaseTool", "path": "app/capabilities/base.py"}
+    ),
+    ToolRequest(tool_name="class_hierarchy", arguments={"name": "LLMProvider"}),
+    ToolRequest(tool_name="module_dependencies", arguments={"path": "app/tools/manager.py"}),
+    ToolRequest(tool_name="analyze_file", arguments={"path": "README.md"}),  # unsupported language
 ]
 
 
@@ -41,9 +49,9 @@ async def main() -> int:
 
     print("\nResults:")
     for request, result in zip(DEMO_REQUESTS, await manager.execute_many(DEMO_REQUESTS), strict=True):
-        target = request.arguments.get("path")
+        arguments = ", ".join(f"{key}={value!r}" for key, value in request.arguments.items())
         status = f"ok    {summarize(result.output)}" if result.ok else f"ERROR {result.error}"
-        print(f"  {request.tool_name}({target!r})\n      {status}")
+        print(f"  {request.tool_name}({arguments})\n      {status}")
     return 0
 
 

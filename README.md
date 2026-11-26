@@ -76,11 +76,12 @@ Dependencies point **inward**: agents depend on abstractions (`LLMProvider`, Lan
 │                   reviewer          (prompts/ feeds these)   │
 ├───────────────────────────────┬──────────────────────────────┤
 │  tools/                       │  memory/        rag/         │
-│   interfaces/ local/ mcp/     │                              │
+│   registry · manager ·        │                              │
+│   adapters (local, mcp)       │                              │
 ├───────────────────────────────┤                              │
-│  services/                    │                              │
-│   filesystem git terminal     │                              │
-│   project                     │                              │
+│  capabilities/                │                              │
+│   filesystem                  │                              │
+│   code_intelligence           │                              │
 ├───────────────────────────────┴──────────────────────────────┤
 │  providers/   llm/  mcp/  embeddings/  vectorstore/          │
 ├──────────────────────────────────────────────────────────────┤
@@ -93,7 +94,7 @@ Dependencies point **inward**: agents depend on abstractions (`LLMProvider`, Lan
 | `app/config/` | Typed settings (`pydantic-settings`) loaded from the environment and `.env`. The only place that reads environment variables. |
 | `app/providers/llm/` | `LLMProvider` abstraction (`invoke`, `stream`, `model_info`) plus Ollama, OpenAI, Gemini and Groq providers. `create_llm_provider()` picks one from `LLM_PROVIDER`. See [LLM providers](#llm-providers). |
 | `app/container.py` | Composition root: the only place that creates the provider, the agent, the graph, the capabilities and the tool manager. |
-| `app/capabilities/` | Domain features exposed to agents as tools plus usage instructions. `filesystem/` is the first. See [Filesystem capability](#filesystem-capability). |
+| `app/capabilities/` | Domain features exposed to agents as tools plus usage instructions. `filesystem/` and `code_intelligence/` so far. See [Filesystem capability](#filesystem-capability) and [Code intelligence](#code-intelligence). |
 | `app/providers/filesystem/` | The only code that touches the operating system's filesystem. |
 | `app/providers/mcp/` | MCP client side: `transport.py` (stdio, HTTP, SSE, WebSocket), `config.py` (the `mcpServers` file), `registry.py` (known servers), `client.py` (`connect` / `list_tools` / `execute_tool`). |
 | `app/providers/embeddings/`, `vectorstore/` | Embedding and vector store backends for RAG (planned). |
@@ -121,7 +122,7 @@ user ──► graph.invoke / graph.stream({"messages": [HumanMessage]})
           │                                         │
           │      {"messages": [AIMessage(name=…)]} ◄┘   (appended by add_messages)
           │
-   route_after_agent ──► END   (Sprint 3 adds: ──► tools ──► agent)
+   route_after_agent ──► END   (Sprint 7 adds: ──► tools ──► agent)
 ```
 
 - `build_graph(agent)` only wires nodes. It never creates providers or agents; `app/container.py` does.
@@ -137,6 +138,7 @@ user ──► graph.invoke / graph.stream({"messages": [HumanMessage]})
 - **All tool calls go through `ToolManager`.** Local and MCP tools share the `ToolAdapter` interface, so callers cannot tell them apart. The tool system does not depend on LangGraph.
 - **Services hold no LLM logic** and can be tested without a model.
 - **Only `app/providers/filesystem/` touches the OS filesystem** (`os`, `shutil`, `tempfile`...). Enforced by `tests/unit/test_architecture.py`.
+- **Code intelligence is language-independent outside `parsers/`**: no module but a parser imports a parsing library (`ast`...), and code is read only through `FilesystemService`. Enforced by `tests/unit/test_architecture.py`.
 - **Settings are injected.** Constructors take a `Settings` object, which keeps tests hermetic.
 
 ---
@@ -159,10 +161,11 @@ All settings are environment variables (see [.env.example](.env.example)). Prece
 | `FS_WORKSPACE_ROOT` | `.` | The only directory filesystem tools may access |
 | `FS_READ_ONLY` | `false` | Refuse every modification |
 | `FS_MAX_READ_BYTES` / `FS_MAX_WRITE_BYTES` | `1048576` | Size limits per file |
-| `FS_MAX_LIST_ENTRIES` | `1000` | Entries returned by one listing |
+| `FS_MAX_LIST_ENTRIES` | `1000` | Entries returned by one listing (also bounds the files a project analysis sees; it reports `truncated`) |
 | `FS_DENIED_PATTERNS` | `[".env", ".env.local", ".env.*.local", "*.pem", "*.key", "id_rsa*", "id_ed25519*"]` | No access at all, not even listing (JSON list) |
 | `FS_PROTECTED_PATTERNS` | `[".git"]` | Readable, never modified |
 | `FS_IGNORED_PATTERNS` | `[".git", ".venv", "node_modules", caches...]` | Skipped by recursive listings |
+| `CODE_MAX_RESULTS` | `50` | Maximum symbols, imports or references returned by one code intelligence query |
 | `MCP_CONFIG_PATH` | `mcp_servers.json` | A missing file means no MCP servers |
 
 ---
@@ -308,6 +311,87 @@ Writes are atomic (temporary file + rename, permissions kept), so an interrupted
 
 ---
 
+## Code intelligence
+
+Lets the agent **understand** the code instead of only reading text: what a project contains, where a symbol is defined, who uses it, which classes inherit from it, what a module depends on. Everything comes from parsed source (Python's `ast`), never from text search.
+
+Tools: `analyze_project`, `analyze_file`, `find_symbol`, `find_class`, `find_function`, `search_import`, `find_definition`, `find_references`, `class_hierarchy`, `module_dependencies`.
+
+```
+ ToolManager ─► LocalToolAdapter ─► code intelligence tool      tool.py
+                                    ▼
+                          CodeIntelligenceService               service.py
+                          builds a fresh index per query, applies limits
+                 ┌──────────────────┼───────────────────────┐
+                 ▼                  ▼                       ▼
+           SymbolSearch       CodeNavigator           (analysis summary)
+           search.py          navigator.py
+           ranked lookups     resolution, definitions,
+                              references, hierarchy, dependencies
+                 └────────┬─────────┘
+                          ▼
+                    SymbolIndex  ◄── SymbolIndexer             indexer.py
+                    dict lookups by qualified name, name, kind,
+                    import binding, referenced name
+                          ▲
+                    CodeAnalyzer                               analyzer.py
+                    lists + reads files, picks the parser,
+                    caches parses by content hash
+                 ┌────────┴──────────────┐
+                 ▼                       ▼
+         FilesystemService        ParserRegistry ─► LanguageParser   parsers/base.py
+         (Sprint 4: same safety   by extension      └ PythonParser   parsers/python.py
+          rules: workspace,                         └ (PHP, JS, TS, Java, Go: future)
+          secrets, .venv ignored)
+```
+
+| Piece | File | Responsibility |
+|---|---|---|
+| Schemas | `schemas.py` | Language-neutral model: `Symbol` (module, class, function, method, variable), `ImportInfo`, `Reference`, `FileAnalysis`, plus tool requests and responses |
+| Parser abstraction | `parsers/base.py` | `LanguageParser` (`language`, `extensions`, `module_name()`, `parse()`) and `ParserRegistry` (extension ─► parser) |
+| Python parser | `parsers/python.py` | `ast`-based: symbols with signatures, bases, decorators, docstrings and lines; imports with relative ones made absolute; references with their dotted expression |
+| Analyzer | `analyzer.py` | `CodeAnalyzer.analyze_file()` / `analyze_project()`. Unreadable or invalid files are reported as `failures`, not fatal |
+| Index | `indexer.py` | `SymbolIndex`: every lookup is a dictionary access. `SymbolIndexer` builds an up-to-date one on demand |
+| Search engine | `search.py` | `SymbolSearch`: symbols ranked exact ─► case-insensitive ─► prefix ─► substring; dotted queries match qualified names; import search |
+| Navigator | `navigator.py` | `CodeNavigator`: name resolution (Go To Definition), references, parent and child classes, module dependencies |
+| Service | `service.py` | `CodeIntelligenceService`: the API used by the tools |
+| Errors | `exceptions.py` | `UnsupportedLanguage`, `ParserError`, `SymbolNotFound`, `AmbiguousSymbol`, `InvalidProject` |
+| Prompt | `prompts.py` | Inspect code before modifying it, never guess implementations, analyze dependencies before editing |
+| Assembly | `capability.py` | filesystem service ─► analyzer ─► indexer ─► service ─► tools |
+
+### Parser abstraction
+
+The parser is the **only** language-specific part. A parser converts one file into the neutral model; qualified names always use `.` (`package.module.Class.method`) whatever the language. To add a language:
+
+```python
+class GoParser(LanguageParser):
+    language = "go"
+    extensions = (".go",)
+
+    def module_name(self, path: str) -> str: ...
+    def parse(self, path: str, source: str) -> FileAnalysis: ...
+```
+
+and add `GoParser()` to `default_parsers()` in `parsers/__init__.py`. The analyzer, index, search engine, navigator, service and tools do not change (a test registers a toy language to prove it).
+
+### Analyzer and index
+
+`CodeAnalyzer` reads the project **through `FilesystemService`**, so code analysis obeys the filesystem safety rules: nothing outside the workspace, secrets never read, `.venv`/`node_modules` skipped, size limits. Parse results are cached by content hash, so each query sees the files as they are now and only changed files are parsed again.
+
+`SymbolIndex` reorganises the analyses into dictionaries: by qualified name, by name, by kind, by referenced name, and per file the **bindings** created by imports (`from app.tools import BaseTool` binds `BaseTool` to `app.tools.BaseTool`).
+
+### Search engine and navigation
+
+- **Search** matches parsed definitions only: searching `execute` finds the methods named `execute`, not comments or strings containing the word.
+- **Go To Definition**: a name used in a file is resolved through that file's imports, its own definitions and its star imports, then looked up while following re-exports (`app.tools.BaseTool` ─► `app.tools.base.BaseTool`).
+- **References**: uses of the symbol's name and of its import aliases. A use resolved to the symbol is `confirmed`; a use that cannot be resolved statically (`self.method()`, `obj.run()`) is kept with `confirmed=false`; a use resolved to something else (another class, a library) is dropped.
+- **Class hierarchy**: base classes resolved across files (or `null` when outside the project) and direct subclasses.
+- **Module dependencies**: what a file imports (internal or external, with the file defining each import) and which files import it, including through re-exports.
+
+Results are capped by `CODE_MAX_RESULTS` (default 50); responses include the `total` before the cap.
+
+---
+
 ## MCP strategy
 
 MCP is the **main way to add capabilities**. Built-in local tools cover only the essentials needed to work offline.
@@ -325,9 +409,9 @@ MCP is the **main way to add capabilities**. Built-in local tools cover only the
 
 The graph is designed so that going from one agent to several only adds nodes; existing code does not change.
 
-1. **Single agent (Sprints 1–6).** One agent node (`BaseAgent` from `agents/base/`) and, from Sprint 6, a tool node that calls `ToolManager`.
-2. **Plan and execute (Sprint 7).** `planner.py` splits a request into steps, and `router.py` loops through the steps and stops when a step fails.
-3. **Supervisor and specialists (Sprint 8+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, provider or model and tool set. Agents communicate only through the shared graph state (`app/orchestration/state.py`); each reply is tagged with the agent's name.
+1. **Single agent (Sprints 1–7).** One agent node (`BaseAgent` from `agents/base/`) and, from Sprint 7, a tool node that calls `ToolManager`.
+2. **Plan and execute (Sprint 8).** `planner.py` splits a request into steps, and `router.py` loops through the steps and stops when a step fails.
+3. **Supervisor and specialists (Sprint 9+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, provider or model and tool set. Agents communicate only through the shared graph state (`app/orchestration/state.py`); each reply is tagged with the agent's name.
 4. **Review loops.** Tester and reviewer findings send work back to the coder, with a limit on iterations and human-in-the-loop interrupts before destructive actions.
 
 ---
@@ -341,12 +425,13 @@ The graph is designed so that going from one agent to several only adds nodes; e
 | **2** ✅ | LLM provider layer: `invoke`/`stream`/`model_info` abstraction, per-provider settings, timeout, factory registry, dependency injection via `app/container.py` |
 | **3** ✅ | Tool system: `BaseTool`, registry, manager, local and MCP adapters, MCP transports, server registry and client (`connect` / `list_tools` / `execute_tool`) |
 | **4** ✅ | Filesystem capability: provider, validator (workspace confinement, secrets, protection, limits), service, 5 tools, usage prompt |
-| **5** | Code intelligence capability: project structure, symbols and search, built on the filesystem service |
-| **6** | Agent tool loop: tools bound to the LLM, tool node calling `ToolManager`, capability prompts in the system prompt; git and terminal capabilities |
-| **7** | Planner and router; checkpointing (short-term memory) and resumable sessions |
-| **8** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |
-| **9** | RAG over the workspace (embeddings, vector store, code-aware chunking) |
-| **10** | Long-term memory, evaluation harness, Docker packaging, observability |
+| **5** ✅ | Code intelligence: parser abstraction, Python parser, analyzer, symbol index, search engine, navigator (definitions, references, hierarchy, dependencies), 10 tools |
+| **6** | Terminal capability: sandboxed command execution in the workspace (tests, linters, builds) |
+| **7** | Agent tool loop: tools bound to the LLM, tool node calling `ToolManager`, capability prompts in the system prompt; git capability |
+| **8** | Planner and router; checkpointing (short-term memory) and resumable sessions |
+| **9** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |
+| **10** | RAG over the workspace (embeddings, vector store, code-aware chunking) |
+| **11** | Long-term memory, evaluation harness, Docker packaging, observability |
 
 ---
 

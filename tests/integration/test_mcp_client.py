@@ -81,11 +81,6 @@ async def test_full_pipeline_with_local_and_mcp_tools() -> None:
 async def test_default_tool_manager_has_capability_tools_and_no_mcp_without_config(tmp_path: Path) -> None:
     settings = make_settings(mcp_config_path=tmp_path / "absent.json", fs_workspace_root=tmp_path)
     manager = await build_tool_manager(settings)
-    assert [s.name for s in manager.list_tools()] == [
-        "create_file",
-        "delete_file",
-        "list_files",
-        "read_file",
-        "write_file",
-    ]
+    names = {s.name for s in manager.list_tools()}
+    assert {"list_files", "read_file", "analyze_project", "find_definition"} <= names
     assert {s.source for s in manager.list_tools()} == {"local"}

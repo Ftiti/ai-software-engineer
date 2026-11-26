@@ -53,3 +53,26 @@ def test_no_os_filesystem_access_outside_filesystem_provider(path: Path) -> None
 def test_filesystem_service_does_not_manipulate_paths() -> None:
     service = APP / "capabilities" / "filesystem" / "service.py"
     assert "pathlib" not in imported_modules(service)
+
+
+CODE_INTELLIGENCE = APP / "capabilities" / "code_intelligence"
+LANGUAGE_PARSERS = CODE_INTELLIGENCE / "parsers"
+
+
+@pytest.mark.parametrize(
+    "path", sorted(CODE_INTELLIGENCE.rglob("*.py")), ids=lambda p: str(p.relative_to(CODE_INTELLIGENCE))
+)
+def test_code_intelligence_is_language_independent_outside_parsers(path: Path) -> None:
+    """Language-specific libraries (``ast`` for Python...) stay inside their parser module."""
+    if LANGUAGE_PARSERS in path.parents:
+        return
+    assert "ast" not in imported_modules(path), f"{path.relative_to(APP)} parses code; move it to a parser"
+
+
+@pytest.mark.parametrize(
+    "path", sorted(CODE_INTELLIGENCE.rglob("*.py")), ids=lambda p: str(p.relative_to(CODE_INTELLIGENCE))
+)
+def test_code_intelligence_reads_files_through_the_filesystem_capability(path: Path) -> None:
+    """Never the provider directly: the filesystem safety rules must apply to code analysis too."""
+    used = {m for m in imported_modules(path) if m.startswith("app.providers.filesystem") or m == "pathlib"}
+    assert not used, f"{path.relative_to(APP)} imports {used}; use FilesystemService"
