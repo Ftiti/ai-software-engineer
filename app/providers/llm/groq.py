@@ -1,27 +1,26 @@
-"""Groq LLM provider. Requires the ``groq`` extra (``uv sync --extra groq``)."""
+"""Groq LLM provider. Requires the ``groq`` extra and ``GROQ_API_KEY``."""
 
 from langchain_core.language_models import BaseChatModel
 
-from app.config import Settings
-from app.providers.llm.base import LLMProvider, LLMProviderError
+from app.providers.llm.base import LLMProvider, ModelInfo
 
 
 class GroqProvider(LLMProvider):
     name = "groq"
 
-    def __init__(self, settings: Settings) -> None:
-        if settings.groq_api_key is None:
-            raise LLMProviderError("GROQ_API_KEY is required when LLM_PROVIDER=groq")
-        self._settings = settings
+    def _configured_model(self) -> str:
+        return self._settings.groq_model
 
-    def chat_model(self, *, model: str | None = None, temperature: float | None = None) -> BaseChatModel:
-        try:
-            from langchain_groq import ChatGroq
-        except ImportError as exc:
-            raise LLMProviderError("Install the 'groq' extra: uv sync --extra groq") from exc
+    def _configured_temperature(self) -> float | None:
+        return self._settings.groq_temperature
 
-        return ChatGroq(
-            api_key=self._settings.groq_api_key,
-            model_name=model or self._settings.groq_model,
-            temperature=self._settings.llm_temperature if temperature is None else temperature,
+    def _create_chat_model(self, info: ModelInfo) -> BaseChatModel:
+        api_key = self._require_api_key(self._settings.groq_api_key, "GROQ_API_KEY")
+        chat_groq = self._import_optional("langchain_groq", "ChatGroq", extra="groq")
+        model: BaseChatModel = chat_groq(
+            api_key=api_key,
+            model=info.model,
+            temperature=info.temperature,
+            timeout=info.timeout,
         )
+        return model

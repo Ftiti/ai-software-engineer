@@ -9,7 +9,7 @@ It is built on:
 - **Ollama** as the default local LLM, with OpenAI, Gemini and Groq available
 - **MCP (Model Context Protocol)** as the main way to add tools
 
-> **Status: Sprint 1.** The LangGraph engine runs: a user message goes through the graph to the configured LLM and back. No tools, MCP servers, memory or multi-agent yet.
+> **Status: Sprint 2.** The LangGraph engine runs end to end on a provider-independent LLM layer (Ollama, OpenAI, Gemini, Groq). No tools, MCP servers, memory or multi-agent yet.
 
 ---
 
@@ -85,7 +85,8 @@ Dependencies point **inward**: agents depend on abstractions (`LLMProvider`, Lan
 | Path | Responsibility |
 |---|---|
 | `app/config/` | Typed settings (`pydantic-settings`) loaded from the environment and `.env`. The only place that reads environment variables. |
-| `app/providers/llm/` | `LLMProvider` interface plus Ollama, OpenAI, Gemini and Groq adapters. `create_llm_provider()` picks one from `LLM_PROVIDER`. Every provider returns a LangChain `BaseChatModel`. |
+| `app/providers/llm/` | `LLMProvider` abstraction (`invoke`, `stream`, `model_info`) plus Ollama, OpenAI, Gemini and Groq providers. `create_llm_provider()` picks one from `LLM_PROVIDER`. See [LLM providers](#llm-providers). |
+| `app/container.py` | Composition root: the only place that creates the provider, the agent and the graph. |
 | `app/providers/mcp/` | MCP server config (`mcpServers` JSON format), the server registry, and `MCPClient`, which turns MCP tools into LangChain tools. |
 | `app/providers/embeddings/`, `vectorstore/` | Embedding and vector store backends for RAG (planned). |
 | `app/services/` | Side-effecting operations (filesystem, git, terminal, project detection). No LLM code. |
@@ -108,14 +109,14 @@ user ──► graph.invoke / graph.stream({"messages": [HumanMessage]})
         agent  ── create_agent_node(BaseAgent) ── BaseAgent.invoke(history)
           │                                         │  [SystemMessage, *history]
           │                                         ▼
-          │                                       BaseChatModel  ◄── create_llm_provider(settings)
+          │                                       LLMProvider.invoke  ◄── injected by app/container.py
           │                                         │
           │      {"messages": [AIMessage(name=…)]} ◄┘   (appended by add_messages)
           │
-   route_after_agent ──► END   (Sprint 2 adds: ──► tools ──► agent)
+   route_after_agent ──► END   (Sprint 3 adds: ──► tools ──► agent)
 ```
 
-- `build_graph(agent)` only wires nodes; `create_graph(settings)` is the single composition root that picks the provider.
+- `build_graph(agent)` only wires nodes. It never creates providers or agents; `app/container.py` does.
 - The system prompt is added on each model call and never stored in state, so agents sharing one history keep their own instructions.
 - Each agent reply carries `AIMessage.name`, so a shared multi-agent history stays attributable.
 - Nodes support both `invoke` and `ainvoke` natively.
@@ -123,7 +124,7 @@ user ──► graph.invoke / graph.stream({"messages": [HumanMessage]})
 
 ### Design rules
 
-- **Nothing outside `providers/llm/` imports a vendor SDK.** Code asks for `create_llm_provider().chat_model()` and gets a `BaseChatModel`.
+- **Nothing outside `providers/llm/` imports a vendor SDK.** Enforced by `tests/unit/test_architecture.py`.
 - **Hosted vendor packages are optional extras** and are imported lazily, so an Ollama-only install never loads them.
 - **Tools are LangChain `BaseTool`s.** Local and MCP tools look the same to an agent.
 - **Services hold no LLM logic** and can be tested without a model.
@@ -138,13 +139,62 @@ All settings are environment variables (see [.env.example](.env.example)). Prece
 | Variable | Default | Notes |
 |---|---|---|
 | `LLM_PROVIDER` | `ollama` | `ollama` \| `openai` \| `gemini` \| `groq` |
-| `LLM_TEMPERATURE` | `0.0` | 0.0–2.0 |
+| `LLM_TEMPERATURE` | `0.0` | 0.0–2.0, used by every provider unless overridden |
+| `LLM_TIMEOUT` | unset | Request timeout in seconds; unset = no limit |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | |
-| `OLLAMA_MODEL` | `llama3.1:8b` | |
-| `OPENAI_API_KEY` / `OPENAI_MODEL` | – / `gpt-4o-mini` | needs `--extra openai` |
-| `GOOGLE_API_KEY` / `GEMINI_MODEL` | – / `gemini-2.0-flash` | needs `--extra gemini` |
-| `GROQ_API_KEY` / `GROQ_MODEL` | – / `llama-3.1-8b-instant` | needs `--extra groq` |
+| `OLLAMA_MODEL` / `OLLAMA_TEMPERATURE` | `llama3.1:8b` / unset | |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_TEMPERATURE` | – / `gpt-4o-mini` / unset | key checked only when OpenAI is used |
+| `GOOGLE_API_KEY` / `GEMINI_MODEL` / `GEMINI_TEMPERATURE` | – / `gemini-2.0-flash` / unset | key checked only when Gemini is used |
+| `GROQ_API_KEY` / `GROQ_MODEL` / `GROQ_TEMPERATURE` | – / `llama-3.1-8b-instant` / unset | key checked only when Groq is used |
 | `MCP_CONFIG_PATH` | `mcp_servers.json` | A missing file means no MCP servers |
+
+---
+
+## LLM providers
+
+| `LLM_PROVIDER` | Backend | API key | Package |
+|---|---|---|---|
+| `ollama` (default) | Local models via [Ollama](https://ollama.com) | none | `langchain-ollama` (always installed) |
+| `openai` | OpenAI | `OPENAI_API_KEY` | `langchain-openai` (extra `openai`) |
+| `gemini` | Google Gemini | `GOOGLE_API_KEY` | `langchain-google-genai` (extra `gemini`) |
+| `groq` | Groq | `GROQ_API_KEY` | `langchain-groq` (extra `groq`) |
+
+### Why an abstraction
+
+Each vendor SDK names the same things differently (`model` vs `model_name`, `timeout` vs `request_timeout`, Ollama has no timeout field at all) and has its own error types. If agents used these classes directly, every agent, node and test would depend on one vendor, and changing provider would mean editing all of them.
+
+Instead, everything goes through `LLMProvider`:
+
+```
+Settings (.env)
+    │
+    ▼
+create_llm_provider()  ── the only code that maps LLM_PROVIDER to a class
+    │
+    ▼
+LLMProvider  (base.py: invoke · ainvoke · stream · astream · model_info · chat_model)
+    ├── OllamaProvider   ─► ChatOllama
+    ├── OpenAIProvider   ─► ChatOpenAI
+    ├── GeminiProvider   ─► ChatGoogleGenerativeAI
+    └── GroqProvider     ─► ChatGroq
+    │
+    ▼  injected by app/container.py
+BaseAgent ─► graph nodes ─► graph   (never see which provider is behind)
+```
+
+- **Template method.** The base class owns everything shared: resolving model, temperature (`<PROVIDER>_TEMPERATURE` > `LLM_TEMPERATURE`) and timeout, caching the chat model, `invoke` / `stream`. A provider is ~20 lines that only say which settings it reads and which vendor class it builds.
+- **Lazy and safe.** Creating a provider never contacts the backend and never needs a key; the key is checked when the model is first built. Vendor packages are imported only when their provider is used, with an install hint if missing.
+- **Open for extension.** `register_provider("name", "package.module:Class")` adds a provider without editing the factory.
+
+### Switching provider
+
+```bash
+# .env
+LLM_PROVIDER=groq
+GROQ_API_KEY=gsk_...
+```
+
+No code changes. The same graph, agent and prompts now run on Groq. To try a provider for one run only: `LLM_PROVIDER=gemini GOOGLE_API_KEY=... uv run python scripts/test_agent.py`.
 
 ---
 
@@ -164,9 +214,9 @@ MCP is the **main way to add capabilities**. Built-in local tools cover only the
 
 The graph is designed so that going from one agent to several only adds nodes; existing code does not change.
 
-1. **Single agent (Sprints 1–2).** One agent node (`BaseAgent` from `agents/base/`) and, from Sprint 2, one tool node in a LangGraph `StateGraph`.
-2. **Plan and execute (Sprint 3).** `planner.py` splits a request into steps, and `router.py` loops through the steps and stops when a step fails.
-3. **Supervisor and specialists (Sprint 4+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, model (via `chat_model(model=...)`) and tool set. Agents communicate only through the shared graph state (`app/orchestration/state.py`); each reply is tagged with the agent's name.
+1. **Single agent (Sprints 1–3).** One agent node (`BaseAgent` from `agents/base/`) and, from Sprint 3, one tool node in a LangGraph `StateGraph`.
+2. **Plan and execute (Sprint 4).** `planner.py` splits a request into steps, and `router.py` loops through the steps and stops when a step fails.
+3. **Supervisor and specialists (Sprint 5+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, provider or model and tool set. Agents communicate only through the shared graph state (`app/orchestration/state.py`); each reply is tagged with the agent's name.
 4. **Review loops.** Tester and reviewer findings send work back to the coder, with a limit on iterations and human-in-the-loop interrupts before destructive actions.
 
 ---
@@ -177,11 +227,12 @@ The graph is designed so that going from one agent to several only adds nodes; e
 |---|---|
 | **0** ✅ | Architecture, configuration, LLM provider abstraction, MCP client wiring, tests |
 | **1** ✅ | LangGraph engine: graph state, base agent, agent node, router foundation, end-to-end script |
-| **2** | Tool node and `tools` route; local tools on the services layer (files, git, terminal) with sandboxing; first MCP servers enabled |
-| **3** | Planner and router; checkpointing (short-term memory) and resumable sessions |
-| **4** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |
-| **5** | RAG over the workspace (embeddings, vector store, code-aware chunking) |
-| **6** | Long-term memory, evaluation harness, Docker packaging, observability |
+| **2** ✅ | LLM provider layer: `invoke`/`stream`/`model_info` abstraction, per-provider settings, timeout, factory registry, dependency injection via `app/container.py` |
+| **3** | Tool system and MCP client: tool node and `tools` route; local tools on the services layer (files, git, terminal) with sandboxing; first MCP servers enabled |
+| **4** | Planner and router; checkpointing (short-term memory) and resumable sessions |
+| **5** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |
+| **6** | RAG over the workspace (embeddings, vector store, code-aware chunking) |
+| **7** | Long-term memory, evaluation harness, Docker packaging, observability |
 
 ---
 

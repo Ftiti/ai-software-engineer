@@ -10,8 +10,8 @@ import sys
 
 from langchain_core.messages import AIMessageChunk, HumanMessage
 
-from app.config import get_settings
-from app.orchestration import create_graph
+from app.container import build_agent
+from app.orchestration import build_graph
 from app.orchestration.nodes import NodeName
 
 DEFAULT_PROMPT = "Explain what you can do."
@@ -24,11 +24,12 @@ def main() -> int:
     parser.add_argument("prompt", nargs="?", default=DEFAULT_PROMPT)
     args = parser.parse_args()
 
-    settings = get_settings()
-    print(f"Provider: {settings.llm_provider}")
+    agent = build_agent()
+    info = agent.provider.model_info
+    print(f"Provider: {info.provider} ({info.model}, temperature={info.temperature})")
     print(f"User:     {args.prompt}\n")
 
-    graph = create_graph(settings)
+    graph = build_graph(agent)
     print("assistant: ", end="", flush=True)
     try:
         # stream_mode="messages" yields LLM tokens as they are generated, tagged with the node

@@ -1,27 +1,28 @@
-"""Google Gemini LLM provider. Requires the ``gemini`` extra (``uv sync --extra gemini``)."""
+"""Google Gemini LLM provider. Requires the ``gemini`` extra and ``GOOGLE_API_KEY``."""
 
 from langchain_core.language_models import BaseChatModel
 
-from app.config import Settings
-from app.providers.llm.base import LLMProvider, LLMProviderError
+from app.providers.llm.base import LLMProvider, ModelInfo
 
 
 class GeminiProvider(LLMProvider):
     name = "gemini"
 
-    def __init__(self, settings: Settings) -> None:
-        if settings.google_api_key is None:
-            raise LLMProviderError("GOOGLE_API_KEY is required when LLM_PROVIDER=gemini")
-        self._settings = settings
+    def _configured_model(self) -> str:
+        return self._settings.gemini_model
 
-    def chat_model(self, *, model: str | None = None, temperature: float | None = None) -> BaseChatModel:
-        try:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-        except ImportError as exc:
-            raise LLMProviderError("Install the 'gemini' extra: uv sync --extra gemini") from exc
+    def _configured_temperature(self) -> float | None:
+        return self._settings.gemini_temperature
 
-        return ChatGoogleGenerativeAI(
-            google_api_key=self._settings.google_api_key,
-            model=model or self._settings.gemini_model,
-            temperature=self._settings.llm_temperature if temperature is None else temperature,
+    def _create_chat_model(self, info: ModelInfo) -> BaseChatModel:
+        api_key = self._require_api_key(self._settings.google_api_key, "GOOGLE_API_KEY")
+        chat_gemini = self._import_optional(
+            "langchain_google_genai", "ChatGoogleGenerativeAI", extra="gemini"
         )
+        model: BaseChatModel = chat_gemini(
+            google_api_key=api_key,
+            model=info.model,
+            temperature=info.temperature,
+            timeout=info.timeout,
+        )
+        return model

@@ -1,32 +1,17 @@
-"""Agent graph tests. A fake chat model replaces the LLM, so no provider is contacted."""
+"""Agent graph tests. A fake provider replaces the LLM, so no backend is contacted."""
 
-from typing import Any
-
-import pytest
-from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END
-from pydantic import Field
 
 from app.agents.base import BASE_SYSTEM_PROMPT, BaseAgent
-from app.config import Settings
-from app.orchestration import AgentState, build_graph, create_graph
+from app.orchestration import AgentState, build_graph
 from app.orchestration.nodes import NodeName, create_agent_node
 from app.orchestration.router import route_after_agent
+from tests.conftest import FakeProvider, RecordingChatModel, fake_llm
 
 
-class RecordingChatModel(GenericFakeChatModel):
-    """Fake model that replies from a fixed list and records what it was sent."""
-
-    received: list[list[BaseMessage]] = Field(default_factory=list)
-
-    def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> Any:
-        self.received.append(list(messages))
-        return super()._generate(messages, *args, **kwargs)
-
-
-def fake_llm(*replies: str) -> RecordingChatModel:
-    return RecordingChatModel(messages=iter([AIMessage(content=r) for r in replies]), received=[])
+def agent_with(llm: RecordingChatModel) -> BaseAgent:
+    return BaseAgent(FakeProvider(llm))
 
 
 def ask(text: str) -> AgentState:
@@ -34,12 +19,12 @@ def ask(text: str) -> AgentState:
 
 
 def test_graph_initializes() -> None:
-    graph = build_graph(BaseAgent(fake_llm()))
+    graph = build_graph(agent_with(fake_llm()))
     assert NodeName.AGENT in graph.get_graph().nodes
 
 
 def test_graph_returns_llm_response() -> None:
-    graph = build_graph(BaseAgent(fake_llm("I can help with code.")))
+    graph = build_graph(agent_with(fake_llm("I can help with code.")))
 
     result = graph.invoke(ask("Explain what you can do."))
 
@@ -53,7 +38,7 @@ def test_graph_returns_llm_response() -> None:
 
 def test_llm_receives_system_prompt_and_history() -> None:
     llm = fake_llm("ok")
-    build_graph(BaseAgent(llm)).invoke(ask("hello"))
+    build_graph(agent_with(llm)).invoke(ask("hello"))
 
     (sent,) = llm.received
     assert isinstance(sent[0], SystemMessage)
@@ -62,13 +47,13 @@ def test_llm_receives_system_prompt_and_history() -> None:
 
 
 def test_system_prompt_is_not_stored_in_state() -> None:
-    result = build_graph(BaseAgent(fake_llm("ok"))).invoke(ask("hello"))
+    result = build_graph(agent_with(fake_llm("ok"))).invoke(ask("hello"))
     assert not any(isinstance(m, SystemMessage) for m in result["messages"])
 
 
 def test_state_carries_conversation_history() -> None:
     llm = fake_llm("first answer", "second answer")
-    graph = build_graph(BaseAgent(llm))
+    graph = build_graph(agent_with(llm))
 
     state = graph.invoke(ask("first question"))
     state = graph.invoke({"messages": [*state["messages"], HumanMessage(content="second question")]})
@@ -84,7 +69,7 @@ def test_state_carries_conversation_history() -> None:
 
 def test_custom_agent_name_and_prompt() -> None:
     llm = fake_llm("done")
-    agent = BaseAgent(llm, name="coder", system_prompt="You write code.")
+    agent = BaseAgent(FakeProvider(llm), name="coder", system_prompt="You write code.")
 
     result = build_graph(agent).invoke(ask("write a function"))
 
@@ -93,7 +78,7 @@ def test_custom_agent_name_and_prompt() -> None:
 
 
 def test_agent_node_returns_only_new_messages() -> None:
-    node = create_agent_node(BaseAgent(fake_llm("reply")))
+    node = create_agent_node(agent_with(fake_llm("reply")))
     update = node.invoke(ask("hi"))
 
     (message,) = update["messages"]
@@ -102,7 +87,7 @@ def test_agent_node_returns_only_new_messages() -> None:
 
 
 async def test_graph_async_invocation() -> None:
-    graph = build_graph(BaseAgent(fake_llm("async reply")))
+    graph = build_graph(agent_with(fake_llm("async reply")))
     result = await graph.ainvoke(ask("hi"))
     assert result["messages"][-1].content == "async reply"
 
@@ -111,17 +96,14 @@ def test_router_ends_turn() -> None:
     assert route_after_agent(ask("hi")) == END
 
 
-def test_create_graph_uses_configured_provider() -> None:
-    # Building the graph must not contact the provider; only invoking it does.
-    graph = create_graph(Settings(_env_file=None, llm_provider="ollama"))
-    assert NodeName.AGENT in graph.get_graph().nodes
+def test_graph_streams_tokens_from_agent_node() -> None:
+    graph = build_graph(agent_with(fake_llm("token by token")))
 
+    tokens = [
+        chunk.text
+        for chunk, meta in graph.stream(ask("hi"), stream_mode="messages")
+        if meta["langgraph_node"] == NodeName.AGENT
+    ]
 
-def test_agent_rejects_non_ai_response() -> None:
-    class WrongModel(GenericFakeChatModel):
-        def invoke(self, *args: Any, **kwargs: Any) -> Any:
-            return HumanMessage(content="not an AI message")
-
-    agent = BaseAgent(WrongModel(messages=iter([])))
-    with pytest.raises(TypeError):
-        agent.invoke([HumanMessage(content="hi")])
+    assert "".join(tokens) == "token by token"
+    assert len(tokens) > 1
