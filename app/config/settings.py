@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LLMProviderName = Literal["ollama", "openai", "gemini", "groq"]
@@ -81,8 +81,139 @@ class Settings(BaseSettings):
     # Code intelligence
     code_max_results: int = Field(default=50, gt=0)  # cap on symbols/imports/references per query
 
+    # Terminal capability. Commands run without a shell, in the filesystem workspace.
+    terminal_enabled: bool = True
+    # Whitelist of program names; "*" allows every program that is not denied.
+    terminal_allowed_commands: list[str] = [
+        "python",
+        "python3",
+        "pytest",
+        "ruff",
+        "mypy",
+        "make",
+        "npm",
+        "node",
+        "composer",
+        "php",
+        "git",
+        "ls",
+        "pwd",
+        "echo",
+    ]
+    # Blacklist: always refused, even with "*". Shells and wrappers would bypass the other rules.
+    terminal_denied_commands: list[str] = [
+        "rm",
+        "rmdir",
+        "sudo",
+        "su",
+        "doas",
+        "dd",
+        "mkfs",
+        "fdisk",
+        "shutdown",
+        "reboot",
+        "halt",
+        "poweroff",
+        "kill",
+        "killall",
+        "pkill",
+        "chmod",
+        "chown",
+        "chgrp",
+        "curl",
+        "wget",
+        "ssh",
+        "scp",
+        "rsync",
+        "nc",
+        "netcat",
+        "telnet",
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "fish",
+        "env",
+        "xargs",
+        "nohup",
+        "eval",
+        "exec",
+        "npx",
+        "crontab",
+        "mount",
+        "umount",
+        "systemctl",
+    ]
+    # For these programs the first argument must be one of the listed subcommands.
+    terminal_allowed_subcommands: dict[str, list[str]] = {
+        "git": ["status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "blame", "shortlog"],
+        "npm": ["install", "ci", "test", "run", "run-script", "ls", "list", "outdated"],
+        "composer": [
+            "install",
+            "update",
+            "require",
+            "dump-autoload",
+            "validate",
+            "show",
+            "outdated",
+            "test",
+            "run-script",
+        ],
+    }
+    # Arguments refused for every program (fnmatch); they can run arbitrary programs or write files.
+    terminal_denied_arguments: list[str] = [
+        "--exec*",
+        "--upload-pack*",
+        "--receive-pack*",
+        "--ext-diff",
+        "--output*",
+        "--config-env*",
+    ]
+    # Environment variables a command may not set (fnmatch): they change what actually runs.
+    terminal_denied_env: list[str] = [
+        "PATH",
+        "LD_*",
+        "DYLD_*",
+        "GIT_*",
+        "PYTHONSTARTUP",
+        "PYTHONPATH",
+        "NODE_OPTIONS",
+        "BASH_ENV",
+        "ENV",
+        "IFS",
+        "PERL5OPT",
+    ]
+    # Host variables passed on to commands. Everything else (API keys, tokens) is not.
+    terminal_inherited_env: list[str] = [
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "TMPDIR",
+        "TZ",
+        "VIRTUAL_ENV",
+    ]
+    terminal_default_timeout: float = Field(default=30.0, gt=0)  # seconds
+    terminal_max_timeout: float = Field(default=50.0, gt=0)  # must stay below TOOL_TIMEOUT
+    terminal_max_output_bytes: int = Field(default=64_000, gt=0)  # per stream (stdout, stderr)
+    terminal_python: str = "python3"  # interpreter used by run_python, run_pytest and run_tests
+
     # MCP
     mcp_config_path: Path = Path("mcp_servers.json")
+
+    @model_validator(mode="after")
+    def _check_terminal_timeouts(self) -> "Settings":
+        if self.terminal_default_timeout > self.terminal_max_timeout:
+            raise ValueError("TERMINAL_DEFAULT_TIMEOUT must not exceed TERMINAL_MAX_TIMEOUT")
+        if self.tool_timeout is not None and self.terminal_max_timeout >= self.tool_timeout:
+            # Otherwise the tool manager would cancel the call before the command's own timeout,
+            # and the agent would lose the partial output.
+            raise ValueError("TERMINAL_MAX_TIMEOUT must be lower than TOOL_TIMEOUT")
+        return self
 
 
 @lru_cache

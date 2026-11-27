@@ -41,13 +41,28 @@ def test_no_vendor_sdk_outside_llm_providers(path: Path) -> None:
 
 OS_MODULES = ("os", "shutil", "tempfile", "io", "glob")
 FILESYSTEM_PROVIDERS = APP / "providers" / "filesystem"
-NON_PROVIDER_SOURCES = sorted(p for p in APP.rglob("*.py") if FILESYSTEM_PROVIDERS not in p.parents)
+TERMINAL_PROVIDERS = APP / "providers" / "terminal"
+OS_PROVIDERS = (FILESYSTEM_PROVIDERS, TERMINAL_PROVIDERS)
+NON_PROVIDER_SOURCES = sorted(
+    p for p in APP.rglob("*.py") if not any(provider in p.parents for provider in OS_PROVIDERS)
+)
 
 
 @pytest.mark.parametrize("path", NON_PROVIDER_SOURCES, ids=lambda p: str(p.relative_to(APP)))
-def test_no_os_filesystem_access_outside_filesystem_provider(path: Path) -> None:
+def test_no_os_access_outside_os_providers(path: Path) -> None:
     used = {m for m in imported_modules(path) if m.split(".")[0] in OS_MODULES}
-    assert not used, f"{path.relative_to(APP)} imports {used}; go through app.providers.filesystem"
+    assert not used, f"{path.relative_to(APP)} imports {used}; go through app.providers"
+
+
+PROCESS_SOURCES = sorted(p for p in APP.rglob("*.py") if TERMINAL_PROVIDERS not in p.parents)
+
+
+@pytest.mark.parametrize("path", PROCESS_SOURCES, ids=lambda p: str(p.relative_to(APP)))
+def test_processes_are_started_only_by_the_terminal_provider(path: Path) -> None:
+    """The agent and the services never reach subprocess: only app.providers.terminal does."""
+    used = {m for m in imported_modules(path) if "subprocess" in m.split(".")}
+    assert not used, f"{path.relative_to(APP)} imports {used}"
+    assert "create_subprocess" not in path.read_text(), f"{path.relative_to(APP)} starts a process"
 
 
 def test_filesystem_service_does_not_manipulate_paths() -> None:

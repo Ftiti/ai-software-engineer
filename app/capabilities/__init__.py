@@ -1,6 +1,6 @@
 """Capabilities: domain features (filesystem, code intelligence, ...) exposed to agents as tools
 plus instructions."""
 
-from app.capabilities.base import Capability, CapabilityTool
+from app.capabilities.base import AsyncCapabilityTool, Capability, CapabilityTool
 
-__all__ = ["Capability", "CapabilityTool"]
+__all__ = ["AsyncCapabilityTool", "Capability", "CapabilityTool"]

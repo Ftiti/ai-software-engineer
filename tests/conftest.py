@@ -22,6 +22,7 @@ _CONFIG_PREFIXES = (
     "TOOL_",
     "FS_",
     "CODE_",
+    "TERMINAL_",
 )
 
 

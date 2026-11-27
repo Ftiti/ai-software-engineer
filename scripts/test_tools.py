@@ -1,7 +1,7 @@
 """Manual check of the tool pipeline on the real workspace (FS_WORKSPACE_ROOT, default: here).
 
 Builds the tool manager exactly like the application (capability tools + MCP tools), lists
-the tools, then runs read-only requests (files and code intelligence), including ones that must be refused.
+the tools, then runs safe requests (files, code intelligence, terminal), including ones that must be refused.
 
 Usage:
     uv run python scripts/test_tools.py
@@ -30,6 +30,13 @@ DEMO_REQUESTS = [
     ToolRequest(tool_name="class_hierarchy", arguments={"name": "LLMProvider"}),
     ToolRequest(tool_name="module_dependencies", arguments={"path": "app/tools/manager.py"}),
     ToolRequest(tool_name="analyze_file", arguments={"path": "README.md"}),  # unsupported language
+    ToolRequest(tool_name="execute_command", arguments={"command": "python3 --version"}),
+    ToolRequest(tool_name="run_git_command", arguments={"args": ["log", "--oneline", "-3"]}),
+    ToolRequest(tool_name="run_pytest", arguments={"args": ["-q", "tests/unit/test_settings.py"]}),
+    ToolRequest(tool_name="execute_command", arguments={"command": "rm -rf app"}),  # blacklist: refused
+    ToolRequest(tool_name="execute_command", arguments={"command": "cat .env"}),  # not whitelisted
+    ToolRequest(tool_name="execute_command", arguments={"command": "ls ../.."}),  # outside: refused
+    ToolRequest(tool_name="run_git_command", arguments={"args": ["push"]}),  # read-only git only
 ]
 
 
@@ -45,7 +52,7 @@ async def main() -> int:
     print(f"Workspace: {settings.fs_workspace_root.resolve()}  (read-only: {settings.fs_read_only})")
     print("Registered tools:")
     for spec in manager.list_tools():
-        print(f"  [{spec.source:5}] {spec.name:14} {spec.description}")
+        print(f"  [{spec.source:5}] {spec.name:17} {spec.description}")
 
     print("\nResults:")
     for request, result in zip(DEMO_REQUESTS, await manager.execute_many(DEMO_REQUESTS), strict=True):

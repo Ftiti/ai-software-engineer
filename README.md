@@ -9,7 +9,7 @@ It is built on:
 - **Ollama** as the default local LLM, with OpenAI, Gemini and Groq available
 - **MCP (Model Context Protocol)** as the main way to add tools
 
-> **Status: Sprint 4.** The LangGraph engine runs end to end on a provider-independent LLM layer (Ollama, OpenAI, Gemini, Groq). The tool system (registry, manager, local and MCP adapters, real MCP client) carries the first capability: safe filesystem access. Tools are not yet connected to the agent graph; no git, terminal, memory or multi-agent yet.
+> **Status: Sprint 6.** The LangGraph engine runs end to end on a provider-independent LLM layer (Ollama, OpenAI, Gemini, Groq). The tool system (registry, manager, local and MCP adapters, real MCP client) carries three capabilities: safe filesystem access, code intelligence and safe command execution. Tools are not yet connected to the agent graph; no git capability, memory or multi-agent yet.
 
 ---
 
@@ -82,8 +82,10 @@ Dependencies point **inward**: agents depend on abstractions (`LLMProvider`, Lan
 │  capabilities/                │                              │
 │   filesystem                  │                              │
 │   code_intelligence           │                              │
+│   terminal                    │                              │
 ├───────────────────────────────┴──────────────────────────────┤
-│  providers/   llm/  mcp/  embeddings/  vectorstore/          │
+│  providers/   llm/  mcp/  filesystem/  terminal/             │
+│               embeddings/  vectorstore/                      │
 ├──────────────────────────────────────────────────────────────┤
 │  config/   models/   utils/          (shared by all layers)  │
 └──────────────────────────────────────────────────────────────┘
@@ -94,11 +96,12 @@ Dependencies point **inward**: agents depend on abstractions (`LLMProvider`, Lan
 | `app/config/` | Typed settings (`pydantic-settings`) loaded from the environment and `.env`. The only place that reads environment variables. |
 | `app/providers/llm/` | `LLMProvider` abstraction (`invoke`, `stream`, `model_info`) plus Ollama, OpenAI, Gemini and Groq providers. `create_llm_provider()` picks one from `LLM_PROVIDER`. See [LLM providers](#llm-providers). |
 | `app/container.py` | Composition root: the only place that creates the provider, the agent, the graph, the capabilities and the tool manager. |
-| `app/capabilities/` | Domain features exposed to agents as tools plus usage instructions. `filesystem/` and `code_intelligence/` so far. See [Filesystem capability](#filesystem-capability) and [Code intelligence](#code-intelligence). |
+| `app/capabilities/` | Domain features exposed to agents as tools plus usage instructions. `filesystem/`, `code_intelligence/` and `terminal/` so far. See [Filesystem capability](#filesystem-capability), [Code intelligence](#code-intelligence) and [Terminal capability](#terminal-capability). |
 | `app/providers/filesystem/` | The only code that touches the operating system's filesystem. |
+| `app/providers/terminal/` | The only code that starts operating-system processes. |
 | `app/providers/mcp/` | MCP client side: `transport.py` (stdio, HTTP, SSE, WebSocket), `config.py` (the `mcpServers` file), `registry.py` (known servers), `client.py` (`connect` / `list_tools` / `execute_tool`). |
 | `app/providers/embeddings/`, `vectorstore/` | Embedding and vector store backends for RAG (planned). |
-| `app/services/` | Reserved for future side-effecting services (git, terminal, project detection). No LLM code. |
+| `app/services/` | Reserved for future side-effecting services (git, project detection). No LLM code. |
 | `app/tools/` | Tool system: `interfaces.py` (contracts), `base.py` (`BaseTool`), `registry.py`, `manager.py`, `adapters/` (local, MCP) and `local/echo.py` (demo tool). See [Tool system](#tool-system). |
 | `app/agents/` | One package per agent role. `base/` holds `BaseAgent` (system prompt + injected chat model) and the shared prompt; specialised agents extend it. |
 | `app/orchestration/` | LangGraph engine: `state.py` (graph state), `nodes.py` (node factories), `router.py` (conditional edges), `graph.py` (wiring + composition root), `planner.py` (planned). |
@@ -138,6 +141,7 @@ user ──► graph.invoke / graph.stream({"messages": [HumanMessage]})
 - **All tool calls go through `ToolManager`.** Local and MCP tools share the `ToolAdapter` interface, so callers cannot tell them apart. The tool system does not depend on LangGraph.
 - **Services hold no LLM logic** and can be tested without a model.
 - **Only `app/providers/filesystem/` touches the OS filesystem** (`os`, `shutil`, `tempfile`...). Enforced by `tests/unit/test_architecture.py`.
+- **Only `app/providers/terminal/` starts processes** (`subprocess`, `asyncio.create_subprocess_*`): the agent never talks to the OS shell. Enforced by `tests/unit/test_architecture.py`.
 - **Code intelligence is language-independent outside `parsers/`**: no module but a parser imports a parsing library (`ast`...), and code is read only through `FilesystemService`. Enforced by `tests/unit/test_architecture.py`.
 - **Settings are injected.** Constructors take a `Settings` object, which keeps tests hermetic.
 
@@ -166,6 +170,16 @@ All settings are environment variables (see [.env.example](.env.example)). Prece
 | `FS_PROTECTED_PATTERNS` | `[".git"]` | Readable, never modified |
 | `FS_IGNORED_PATTERNS` | `[".git", ".venv", "node_modules", caches...]` | Skipped by recursive listings |
 | `CODE_MAX_RESULTS` | `50` | Maximum symbols, imports or references returned by one code intelligence query |
+| `TERMINAL_ENABLED` | `true` | Register the terminal tools |
+| `TERMINAL_ALLOWED_COMMANDS` | `["python", "python3", "pytest", "ruff", "mypy", "make", "npm", "node", "composer", "php", "git", "ls", "pwd", "echo"]` | Whitelist of program names (JSON list); `"*"` allows every program that is not denied |
+| `TERMINAL_DENIED_COMMANDS` | `["rm", "sudo", "curl", "ssh", "bash", "sh", "env", "npx", ...]` | Blacklist, always refused, even with `"*"` |
+| `TERMINAL_ALLOWED_SUBCOMMANDS` | git: read-only (`status`, `diff`, `log`...); npm: `install`, `ci`, `test`, `run`...; composer: `install`, `update`, `test`... | JSON object: for these programs the first argument must be listed |
+| `TERMINAL_DENIED_ARGUMENTS` | `["--exec*", "--upload-pack*", "--output*", ...]` | Arguments refused for every program (fnmatch) |
+| `TERMINAL_DENIED_ENV` | `["PATH", "LD_*", "GIT_*", "PYTHONPATH", "NODE_OPTIONS", ...]` | Variables a command may not set |
+| `TERMINAL_INHERITED_ENV` | `["PATH", "HOME", "USER", "LANG", ...]` | Host variables passed to commands; all others (API keys, tokens) are not |
+| `TERMINAL_DEFAULT_TIMEOUT` / `TERMINAL_MAX_TIMEOUT` | `30` / `50` | Seconds. The max must stay below `TOOL_TIMEOUT` (checked at startup) |
+| `TERMINAL_MAX_OUTPUT_BYTES` | `64000` | Per stream; longer output keeps its beginning and end |
+| `TERMINAL_PYTHON` | `python3` | Interpreter used by `run_python`, `run_pytest` and `run_tests` |
 | `MCP_CONFIG_PATH` | `mcp_servers.json` | A missing file means no MCP servers |
 
 ---
@@ -392,6 +406,78 @@ Results are capped by `CODE_MAX_RESULTS` (default 50); responses include the `to
 
 ---
 
+## Terminal capability
+
+Lets the agent **run** things: tests, linters, type checkers, builds, package managers and read-only git commands, so it can check its own changes. Commands run in the filesystem workspace, never through a shell, and go through the tool system like every other tool: the agent never reaches `subprocess`.
+
+Tools: `execute_command`, `run_tests`, `run_python`, `run_pytest`, `run_make`, `run_npm`, `run_composer`, `run_git_command`. Each returns `stdout`, `stderr`, `exit_code`, `succeeded`, `timed_out`, `duration_seconds` and `truncated`. Every tool accepts `working_directory` (relative to the workspace), `timeout` and `env`.
+
+```
+ ToolManager ─► LocalToolAdapter ─► terminal tool                 capabilities/terminal/tool.py
+                                    │  async: runs on the event loop, so cancelling the
+                                    │  call (ToolManager timeout) stops the process
+                                    │  TerminalError ─► ToolExecutionError
+                                    ▼
+                             TerminalService                      service.py
+                                    │  business logic: request ─► argument vector
+                                    │  (python -m pytest, npm test -- ..., runner detection)
+                                    ▼
+                             CommandValidator                     validator.py
+                                    │  every safety rule ─► ValidatedCommand
+                                    │  workspace checks delegated to the filesystem PathValidator
+                                    ▼
+                             CommandExecutor                      executor.py
+                                    │  environment (filtered), OS error translation,
+                                    │  output decoding and truncation ─► CommandResult
+                                    ▼
+                             TerminalProvider                     providers/terminal/
+                             (base.py / local.py)                 the ONLY code starting processes:
+                                    │                             own process group, timeout,
+                                    ▼                             bounded capture, kill on cancel
+                             Operating system
+```
+
+| Layer | File | Responsibility |
+|---|---|---|
+| Tools | `capabilities/terminal/tool.py` | One small class per tool, mapping its input to one service call |
+| Schemas | `capabilities/terminal/schemas.py` | `CommandOptions` (working directory, timeout, env), one request per tool, `CommandResult` |
+| Service | `capabilities/terminal/service.py` | Business logic only: which command a request means. No process or OS code |
+| Validator | `capabilities/terminal/validator.py` | `TerminalPolicy` and every safety rule |
+| Executor | `capabilities/terminal/executor.py` | Runs a `ValidatedCommand` through the provider and builds the result |
+| Exceptions | `capabilities/terminal/exceptions.py` | `InvalidCommand`, `CommandNotAllowed`, `WorkspaceViolation`, `CommandNotFound`, `CommandPermissionDenied` |
+| Prompt | `capabilities/terminal/prompts.py` | How the agent should use the tools (dedicated tools first, read failures, never work around a refusal) |
+| Assembly | `capabilities/terminal/capability.py` | provider ─► validator ─► executor ─► service ─► tools, returned as a `Capability` |
+| Provider | `providers/terminal/` | `TerminalProvider` interface and `LocalTerminalProvider` (asyncio subprocesses) |
+
+### Execution flow
+
+1. The LLM calls, say, `run_tests` with `{"args": ["-x"]}`. `ToolManager` validates the arguments against the tool's input model.
+2. `TerminalService` picks the runner from the project files (`pyproject.toml` ─► pytest, `package.json` ─► `npm test`, `composer.json` ─► `composer test`, `Makefile` ─► `make test`) and builds `["python3", "-m", "pytest", "-x"]`.
+3. `CommandValidator` checks the program, subcommand, arguments, working directory, timeout and environment, and returns a `ValidatedCommand`.
+4. `CommandExecutor` builds the environment and calls the provider.
+5. `LocalTerminalProvider` starts the process in its own process group with an empty stdin, reads stdout and stderr concurrently, and stops the whole group on timeout (SIGTERM, then SIGKILL after 2 s).
+6. The result comes back as data. **A failing command is a normal result** (`succeeded: false`, exit code, stderr) for the agent to read and fix; only a refused or impossible command is a tool error.
+
+### Security model
+
+- **No shell, ever.** A command line is split with POSIX quoting (`shlex`) and executed as an argument vector. Pipes, redirections, `&&`, `;`, globs and `$VARIABLES` cannot do anything; shell operators are refused with an explanation instead of being passed as arguments.
+- **Whitelist and blacklist.** The program must be a bare name (no `/usr/bin/x`, no `./script`) in `TERMINAL_ALLOWED_COMMANDS`. `TERMINAL_DENIED_COMMANDS` always wins, even over `"*"`. Shells and wrappers (`bash`, `sh`, `env`, `xargs`, `npx`) are blacklisted because they would run a command that skipped these checks.
+- **Subcommands.** git is limited to read-only subcommands (the Git capability comes later), npm and composer to development commands. Options before the subcommand (`git -c core.pager=...`) are refused.
+- **Dangerous arguments.** `TERMINAL_DENIED_ARGUMENTS` blocks options that run other programs or write files (`--exec`, `--upload-pack`, `--output`...).
+- **Workspace confinement.** The working directory must be inside `FS_WORKSPACE_ROOT`. Path arguments that leave it (absolute paths, `..`) are refused, and so are arguments naming a secret (`FS_DENIED_PATTERNS`), so `python3 .env` fails just like `read_file(".env")`. Both capabilities share the filesystem `PathValidator`: one definition of the workspace.
+- **Clean environment.** Commands receive only `TERMINAL_INHERITED_ENV` from the host, so API keys and tokens in the agent's environment do not leak. Variables that change what runs (`PATH`, `LD_PRELOAD`, `GIT_*`...) cannot be set. `NO_COLOR`, `PAGER=cat` and `GIT_TERMINAL_PROMPT=0` keep commands non-interactive.
+- **Limits.** Timeout per command (max `TERMINAL_MAX_TIMEOUT`, below `TOOL_TIMEOUT`); output capped per stream, keeping the beginning and the end; cancellation and timeout kill child processes too.
+
+**Limits of the model.** These rules prevent mistakes and obvious misuse; they are not a sandbox. An allowed interpreter (`python3 -c ...`, `node -e ...`) or a project script (`make`, `npm run`) can do anything the user running the agent can. For untrusted work, run the agent in a container (Sprint 11), or trim `TERMINAL_ALLOWED_COMMANDS`, or set `TERMINAL_ENABLED=false`.
+
+### Integration with the next sprints
+
+- **Git capability (Sprint 7)**: a separate capability with its own rules (commit, branch, never force push) built on the same `TerminalProvider`. `run_git_command` stays read-only.
+- **Planner and supervisor (Sprints 8–9)**: they call tools through `ToolManager` like the agent does; per-agent tool allowlists will give the tester `run_tests` and the reviewer read-only tools, without changes here.
+- **MCP**: terminal tools are ordinary `BaseTool`s, so they can be exposed by the agent's own MCP server later, and a remote MCP terminal would sit next to them unchanged.
+
+---
+
 ## MCP strategy
 
 MCP is the **main way to add capabilities**. Built-in local tools cover only the essentials needed to work offline.
@@ -426,7 +512,7 @@ The graph is designed so that going from one agent to several only adds nodes; e
 | **3** ✅ | Tool system: `BaseTool`, registry, manager, local and MCP adapters, MCP transports, server registry and client (`connect` / `list_tools` / `execute_tool`) |
 | **4** ✅ | Filesystem capability: provider, validator (workspace confinement, secrets, protection, limits), service, 5 tools, usage prompt |
 | **5** ✅ | Code intelligence: parser abstraction, Python parser, analyzer, symbol index, search engine, navigator (definitions, references, hierarchy, dependencies), 10 tools |
-| **6** | Terminal capability: sandboxed command execution in the workspace (tests, linters, builds) |
+| **6** ✅ | Terminal capability: provider (process groups, timeout, cancellation, bounded output), validator (no shell, whitelist/blacklist, subcommands, workspace, environment), executor, service, 8 tools, usage prompt |
 | **7** | Agent tool loop: tools bound to the LLM, tool node calling `ToolManager`, capability prompts in the system prompt; git capability |
 | **8** | Planner and router; checkpointing (short-term memory) and resumable sessions |
 | **9** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |

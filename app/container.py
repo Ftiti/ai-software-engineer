@@ -1,7 +1,8 @@
 """Composition root: the one place where the application's objects are created and wired.
 
     Settings -> create_llm_provider -> LLMProvider -> BaseAgent -> build_graph -> graph
-    Settings -> capabilities (filesystem, code intelligence, ...) + MCP tools -> ToolRegistry -> ToolManager
+    Settings -> capabilities (filesystem, code intelligence, terminal) + MCP tools -> ToolRegistry
+             -> ToolManager
 
 Every other module receives its collaborators instead of building them, so swapping a
 provider or adding a capability (tools, MCP servers, agents) only changes this module.
@@ -16,6 +17,7 @@ from app.capabilities.code_intelligence import (
     build_code_intelligence_service,
 )
 from app.capabilities.filesystem import build_filesystem_capability, build_filesystem_service
+from app.capabilities.terminal import build_terminal_capability, build_terminal_service
 from app.config import Settings, get_settings
 from app.orchestration import AgentGraph, build_graph
 from app.providers.llm import LLMProvider, create_llm_provider
@@ -41,10 +43,14 @@ def build_capabilities(settings: Settings) -> list[Capability]:
     same safety rules as the file tools.
     """
     files = build_filesystem_service(settings)
-    return [
+    capabilities = [
         build_filesystem_capability(files),
         build_code_intelligence_capability(build_code_intelligence_service(settings, files)),
     ]
+    if settings.terminal_enabled:
+        # Same workspace rules as the file tools: commands run inside it and cannot name secrets.
+        capabilities.append(build_terminal_capability(build_terminal_service(settings, files.validator)))
+    return capabilities
 
 
 def build_local_tools(settings: Settings) -> list[BaseTool[Any]]:

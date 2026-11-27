@@ -34,6 +34,11 @@ class FilesystemService:
         self._provider = provider
         self._validator = validator
 
+    @property
+    def validator(self) -> PathValidator:
+        """The workspace rules, shared with capabilities that act on the workspace (terminal)."""
+        return self._validator
+
     # -- Read-only inspection ----------------------------------------------------------------
 
     def list_directory(self, path: str = ".", *, recursive: bool = False) -> ListDirectoryResponse:
