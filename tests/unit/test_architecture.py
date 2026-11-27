@@ -91,3 +91,29 @@ def test_code_intelligence_reads_files_through_the_filesystem_capability(path: P
     """Never the provider directly: the filesystem safety rules must apply to code analysis too."""
     used = {m for m in imported_modules(path) if m.startswith("app.providers.filesystem") or m == "pathlib"}
     assert not used, f"{path.relative_to(APP)} imports {used}; use FilesystemService"
+
+
+GIT_CAPABILITY = APP / "capabilities" / "git"
+GIT_PROVIDERS = APP / "providers" / "git"
+
+
+@pytest.mark.parametrize("name", ["service.py", "tool.py", "validator.py", "repository.py", "schemas.py"])
+def test_git_capability_reaches_processes_only_through_the_git_provider(name: str) -> None:
+    """Only the assembly (capability.py) knows the terminal provider; the rest talks to GitProvider."""
+    used = {m for m in imported_modules(GIT_CAPABILITY / name) if m.startswith("app.providers.terminal")}
+    assert not used, f"capabilities/git/{name} imports {used}"
+
+
+@pytest.mark.parametrize("path", sorted(APP.rglob("*.py")), ids=lambda p: str(p.relative_to(APP)))
+def test_only_the_git_capability_uses_the_git_provider(path: Path) -> None:
+    allowed = (GIT_CAPABILITY, GIT_PROVIDERS)
+    if any(folder in path.parents for folder in allowed):
+        return
+    used = {m for m in imported_modules(path) if m.startswith("app.providers.git")}
+    assert not used, f"{path.relative_to(APP)} imports {used}; go through the Git capability"
+
+
+def test_git_provider_does_not_start_processes_itself() -> None:
+    for path in GIT_PROVIDERS.rglob("*.py"):
+        modules = imported_modules(path)
+        assert not {m for m in modules if m.split(".")[0] in ("os", "subprocess", "asyncio")}, path.name

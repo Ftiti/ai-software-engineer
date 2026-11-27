@@ -84,7 +84,7 @@ def test_wildcard_allows_everything_but_the_blacklist(paths: PathValidator) -> N
         validator.validate(["rm", "x"])
 
 
-@pytest.mark.parametrize("argv", [["git", "status"], ["git", "log", "-n", "3"], ["npm", "run", "build"]])
+@pytest.mark.parametrize("argv", [["npm", "test"], ["npm", "run", "build"], ["composer", "install", "-n"]])
 def test_allowed_subcommands(validator: CommandValidator, argv: list[str]) -> None:
     assert validator.validate(argv).argv == tuple(argv)
 
@@ -92,11 +92,11 @@ def test_allowed_subcommands(validator: CommandValidator, argv: list[str]) -> No
 @pytest.mark.parametrize(
     ("argv", "error"),
     [
-        (["git", "push", "--force"], "'git push' is not allowed. Allowed git subcommands: status, log"),
-        (["git"], "'git' is not allowed"),
-        (["git", "-c", "core.pager=sh", "status"], "'git -c' is not allowed"),
-        (["npm", "publish"], "'npm publish' is not allowed"),
-        (["git", "log", "--exec=evil"], "argument '--exec=evil' is not allowed"),
+        (["npm", "publish"], "'npm publish' is not allowed. Allowed npm subcommands: test, run"),
+        (["npm"], "'npm' is not allowed"),
+        (["npm", "--prefix", "/tmp", "test"], "'npm --prefix' is not allowed"),
+        (["composer", "install", "--exec=evil"], "argument '--exec=evil' is not allowed"),
+        (["git", "status"], "'git' is blocked"),
     ],
 )
 def test_subcommands_and_arguments_refused(validator: CommandValidator, argv: list[str], error: str) -> None:

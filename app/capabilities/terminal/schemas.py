@@ -76,10 +76,6 @@ class RunComposerRequest(CommandOptions):
     args: list[str] = _args("['install'] or ['test']")
 
 
-class RunGitRequest(CommandOptions):
-    args: list[str] = _args("['status', '--short'] or ['diff', 'app/main.py'] (read-only subcommands)")
-
-
 # -- Response -------------------------------------------------------------------------------
 
 

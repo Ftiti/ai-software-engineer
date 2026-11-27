@@ -8,7 +8,7 @@ checks, in order:
    ``&&``, ``>``...) are refused instead of being silently passed as arguments.
 2. **Program allowed**: a bare name (no path), not in ``denied_commands`` (the blacklist always
    wins), and in ``allowed_commands`` (the whitelist; ``*`` allows every non-denied program).
-3. **Subcommand allowed**: for programs listed in ``allowed_subcommands`` (git, npm,
+3. **Subcommand allowed**: for programs listed in ``allowed_subcommands`` (npm,
    composer), the first argument must be one of those subcommands.
 4. **Arguments safe**: none matches ``denied_arguments`` (``--exec=...``, ...). Arguments that
    are paths leaving the working directory (absolute or with ``..``) must stay inside the
@@ -142,7 +142,9 @@ class CommandValidator:
         if "/" in program or "\\" in program:
             raise CommandNotAllowed(f"Give the program name only (e.g. 'pytest'), not a path: {program!r}")
         if program in self._policy.denied_commands:
-            raise CommandNotAllowed(f"{program!r} is blocked: it is considered dangerous")
+            raise CommandNotAllowed(
+                f"{program!r} is blocked in the terminal: it is dangerous or has dedicated tools (e.g. git_*)"
+            )
         allowed = self._policy.allowed_commands
         if ANY_COMMAND not in allowed and program not in allowed:
             raise CommandNotAllowed(f"{program!r} is not an allowed command. Allowed: {', '.join(allowed)}")

@@ -23,6 +23,7 @@ _CONFIG_PREFIXES = (
     "FS_",
     "CODE_",
     "TERMINAL_",
+    "GIT_",
 )
 
 

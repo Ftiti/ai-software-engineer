@@ -19,7 +19,6 @@ from tests.conftest import make_settings
 TOOL_NAMES = [
     "execute_command",
     "run_composer",
-    "run_git_command",
     "run_make",
     "run_npm",
     "run_pytest",
@@ -73,7 +72,8 @@ async def test_failed_command_is_a_successful_tool_call(manager: ToolManager) ->
         (call("execute_command", command="cat .env"), "'cat' is not an allowed command"),
         (call("execute_command", command="ls | wc"), "Shell operators"),
         (call("execute_command", command="ls", working_directory=".."), "outside the workspace"),
-        (call("run_git_command", args=["push"]), "'git push' is not allowed"),
+        (call("execute_command", command="git status"), "'git' is blocked"),
+        (call("run_npm", args=["publish"]), "'npm publish' is not allowed"),
         (call("execute_command", command="ls", timeout=999), "exceeds the maximum"),
         (call("execute_command", command="ls", timeout=-1), "greater than 0"),
         (call("execute_command"), "command: Field required"),
@@ -117,7 +117,7 @@ def test_capability_bundles_tools_and_prompt(workspace: Path) -> None:
 
 def test_container_registers_terminal_tools(workspace: Path) -> None:
     settings = make_settings(fs_workspace_root=workspace)
-    assert [c.name for c in build_capabilities(settings)] == ["filesystem", "code_intelligence", "terminal"]
+    assert "terminal" in [c.name for c in build_capabilities(settings)]
     assert set(TOOL_NAMES) <= {t.name for t in build_local_tools(settings)}
 
 

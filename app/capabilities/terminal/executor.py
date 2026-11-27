@@ -10,16 +10,7 @@ from collections.abc import Mapping
 from app.capabilities.terminal.exceptions import CommandNotFound, CommandPermissionDenied, TerminalError
 from app.capabilities.terminal.schemas import CommandResult
 from app.capabilities.terminal.validator import TerminalPolicy, ValidatedCommand
-from app.providers.terminal import ProcessRequest, StreamOutput, TerminalProvider
-
-# Set for every command: no colours, pagers or interactive prompts (stdin is empty anyway).
-NON_INTERACTIVE_ENV: Mapping[str, str] = {
-    "NO_COLOR": "1",
-    "PAGER": "cat",
-    "GIT_PAGER": "cat",
-    "GIT_TERMINAL_PROMPT": "0",
-    "PYTHONUNBUFFERED": "1",
-}
+from app.providers.terminal import ProcessRequest, TerminalProvider, process_environment
 
 
 class CommandExecutor:
@@ -52,24 +43,14 @@ class CommandExecutor:
             succeeded=result.exit_code == 0 and not result.timed_out,
             timed_out=result.timed_out,
             duration_seconds=round(result.duration, 3),
-            stdout=_decode(result.stdout),
-            stderr=_decode(result.stderr) + (_timeout_note(command.timeout) if result.timed_out else ""),
+            stdout=result.stdout.text(),
+            stderr=result.stderr.text() + (_timeout_note(command.timeout) if result.timed_out else ""),
             truncated=result.stdout.truncated or result.stderr.truncated,
         )
 
     def _environment(self, extra: Mapping[str, str]) -> dict[str, str]:
         """Only the allowed host variables (never API keys or tokens), then fixed and requested ones."""
-        host = self._provider.environment()
-        inherited = {name: host[name] for name in self._policy.inherited_env if name in host}
-        return {**inherited, **NON_INTERACTIVE_ENV, **extra}
-
-
-def _decode(stream: StreamOutput) -> str:
-    head = stream.head.decode("utf-8", errors="replace")
-    if not stream.truncated:
-        return head + stream.tail.decode("utf-8", errors="replace")
-    omitted = stream.total_bytes - len(stream.head) - len(stream.tail)
-    return f"{head}\n[... {omitted} bytes omitted ...]\n{stream.tail.decode('utf-8', errors='replace')}"
+        return process_environment(self._provider.environment(), self._policy.inherited_env, extra)
 
 
 def _timeout_note(timeout: float) -> str:

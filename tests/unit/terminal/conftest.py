@@ -19,9 +19,9 @@ from app.providers.terminal import (
 )
 
 POLICY = TerminalPolicy(
-    allowed_commands=("python3", "echo", "ls", "git", "npm", "composer", "make", "noexec"),
-    denied_commands=("rm", "bash"),
-    allowed_subcommands={"git": ("status", "log"), "npm": ("test", "run"), "composer": ("test", "install")},
+    allowed_commands=("python3", "echo", "ls", "npm", "composer", "make", "noexec"),
+    denied_commands=("rm", "bash", "git"),
+    allowed_subcommands={"npm": ("test", "run"), "composer": ("test", "install")},
     denied_arguments=("--exec*",),
     denied_env=("PATH", "LD_*"),
     inherited_env=("PATH", "HOME", "LANG"),

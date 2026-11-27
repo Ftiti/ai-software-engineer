@@ -67,9 +67,6 @@ class TerminalService:
     ) -> CommandResult:
         return await self.run(["composer", *args], options)
 
-    async def run_git(self, args: Sequence[str], options: CommandOptions = DEFAULT_OPTIONS) -> CommandResult:
-        return await self.run(["git", *args], options)
-
     async def run_tests(
         self, runner: TestRunner = "auto", args: Sequence[str] = (), options: CommandOptions = DEFAULT_OPTIONS
     ) -> CommandResult:

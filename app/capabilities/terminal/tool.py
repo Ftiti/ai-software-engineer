@@ -14,7 +14,6 @@ from app.capabilities.terminal.exceptions import TerminalError
 from app.capabilities.terminal.schemas import (
     ExecuteCommandRequest,
     RunComposerRequest,
-    RunGitRequest,
     RunMakeRequest,
     RunNpmRequest,
     RunPytestRequest,
@@ -102,15 +101,6 @@ class RunComposerTool(TerminalTool[RunComposerRequest]):
         return await self._service.run_composer(params.args, params)
 
 
-class RunGitCommandTool(TerminalTool[RunGitRequest]):
-    name = "run_git_command"
-    description = "Run a read-only git subcommand (status, diff, log, show...)." + _RESULT
-    input_model = RunGitRequest
-
-    async def _arun(self, params: RunGitRequest) -> BaseModel:
-        return await self._service.run_git(params.args, params)
-
-
 TERMINAL_TOOLS: tuple[type[TerminalTool[Any]], ...] = (
     ExecuteCommandTool,
     RunTestsTool,
@@ -119,7 +109,6 @@ TERMINAL_TOOLS: tuple[type[TerminalTool[Any]], ...] = (
     RunMakeTool,
     RunNpmTool,
     RunComposerTool,
-    RunGitCommandTool,
 )
 
 

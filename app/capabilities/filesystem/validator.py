@@ -126,6 +126,9 @@ class PathValidator:
     def exists(self, path: ResolvedPath) -> bool:
         return self._provider.exists(path.absolute)
 
+    def is_directory(self, path: ResolvedPath) -> bool:
+        return self._provider.exists(path.absolute) and self._provider.stat(path.absolute).is_dir
+
     def is_denied(self, relative: str) -> bool:
         return _matches(relative, self._policy.denied_patterns)
 

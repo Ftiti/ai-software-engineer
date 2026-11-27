@@ -141,13 +141,9 @@ async def test_program_shortcuts(recorded: TerminalService, recorder: RecordingP
     assert argv(recorder) == ("npm", "run", "build")
     await recorded.run_composer(["install"])
     assert argv(recorder) == ("composer", "install")
-    await recorded.run_git(["status"])
-    assert argv(recorder) == ("git", "status")
 
 
 async def test_shortcuts_are_validated_too(recorded: TerminalService) -> None:
-    with pytest.raises(CommandNotAllowed, match="'git push' is not allowed"):
-        await recorded.run_git(["push"])
     with pytest.raises(CommandNotAllowed, match="'npm publish' is not allowed"):
         await recorded.run_npm(["publish"])
 

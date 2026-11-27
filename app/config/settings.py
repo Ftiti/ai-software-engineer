@@ -95,13 +95,14 @@ class Settings(BaseSettings):
         "node",
         "composer",
         "php",
-        "git",
         "ls",
         "pwd",
         "echo",
     ]
-    # Blacklist: always refused, even with "*". Shells and wrappers would bypass the other rules.
+    # Blacklist: always refused, even with "*". Shells and wrappers would bypass the other rules;
+    # git goes through the Git capability only.
     terminal_denied_commands: list[str] = [
+        "git",
         "rm",
         "rmdir",
         "sudo",
@@ -146,7 +147,6 @@ class Settings(BaseSettings):
     ]
     # For these programs the first argument must be one of the listed subcommands.
     terminal_allowed_subcommands: dict[str, list[str]] = {
-        "git": ["status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "blame", "shortlog"],
         "npm": ["install", "ci", "test", "run", "run-script", "ls", "list", "outdated"],
         "composer": [
             "install",
@@ -202,17 +202,36 @@ class Settings(BaseSettings):
     terminal_max_output_bytes: int = Field(default=64_000, gt=0)  # per stream (stdout, stderr)
     terminal_python: str = "python3"  # interpreter used by run_python, run_pytest and run_tests
 
+    # Git capability. Git runs through the terminal provider (no shell), in repositories whose root is
+    # inside FS_WORKSPACE_ROOT; FS_READ_ONLY also refuses every modifying git operation.
+    git_enabled: bool = True
+    git_executable: str = "git"
+    git_allow_push: bool = False  # git_push is registered only when true; never forced
+    git_protected_branches: list[str] = []  # branches git_push refuses, e.g. ["main", "master"]
+    git_allow_hooks: bool = True  # repository hooks run like the project's Makefile; false disables them
+    git_timeout: float = Field(default=30.0, gt=0)  # seconds, local operations
+    git_network_timeout: float = Field(default=50.0, gt=0)  # seconds, fetch / pull / push
+    git_max_output_bytes: int = Field(default=64_000, gt=0)  # diff / show text returned to the agent
+    git_max_log_entries: int = Field(default=100, gt=0)
+    # Host variables passed to git in addition to TERMINAL_INHERITED_ENV (ssh agent, config location).
+    git_extra_inherited_env: list[str] = ["SSH_AUTH_SOCK", "XDG_CONFIG_HOME"]
+
     # MCP
     mcp_config_path: Path = Path("mcp_servers.json")
 
     @model_validator(mode="after")
-    def _check_terminal_timeouts(self) -> "Settings":
+    def _check_timeouts(self) -> "Settings":
         if self.terminal_default_timeout > self.terminal_max_timeout:
             raise ValueError("TERMINAL_DEFAULT_TIMEOUT must not exceed TERMINAL_MAX_TIMEOUT")
         if self.tool_timeout is not None and self.terminal_max_timeout >= self.tool_timeout:
             # Otherwise the tool manager would cancel the call before the command's own timeout,
             # and the agent would lose the partial output.
             raise ValueError("TERMINAL_MAX_TIMEOUT must be lower than TOOL_TIMEOUT")
+        if (
+            self.tool_timeout is not None
+            and max(self.git_timeout, self.git_network_timeout) >= self.tool_timeout
+        ):
+            raise ValueError("GIT_TIMEOUT and GIT_NETWORK_TIMEOUT must be lower than TOOL_TIMEOUT")
         return self
 
 

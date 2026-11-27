@@ -9,7 +9,7 @@ It is built on:
 - **Ollama** as the default local LLM, with OpenAI, Gemini and Groq available
 - **MCP (Model Context Protocol)** as the main way to add tools
 
-> **Status: Sprint 6.** The LangGraph engine runs end to end on a provider-independent LLM layer (Ollama, OpenAI, Gemini, Groq). The tool system (registry, manager, local and MCP adapters, real MCP client) carries three capabilities: safe filesystem access, code intelligence and safe command execution. Tools are not yet connected to the agent graph; no git capability, memory or multi-agent yet.
+> **Status: Sprint 7.** The LangGraph engine runs end to end on a provider-independent LLM layer (Ollama, OpenAI, Gemini, Groq). The tool system (registry, manager, local and MCP adapters, real MCP client) carries four capabilities: safe filesystem access, code intelligence, safe command execution and safe Git operations. Tools are not yet connected to the agent graph; no memory or multi-agent yet.
 
 ---
 
@@ -83,8 +83,9 @@ Dependencies point **inward**: agents depend on abstractions (`LLMProvider`, Lan
 │   filesystem                  │                              │
 │   code_intelligence           │                              │
 │   terminal                    │                              │
+│   git                         │                              │
 ├───────────────────────────────┴──────────────────────────────┤
-│  providers/   llm/  mcp/  filesystem/  terminal/             │
+│  providers/   llm/  mcp/  filesystem/  terminal/  git/       │
 │               embeddings/  vectorstore/                      │
 ├──────────────────────────────────────────────────────────────┤
 │  config/   models/   utils/          (shared by all layers)  │
@@ -96,12 +97,13 @@ Dependencies point **inward**: agents depend on abstractions (`LLMProvider`, Lan
 | `app/config/` | Typed settings (`pydantic-settings`) loaded from the environment and `.env`. The only place that reads environment variables. |
 | `app/providers/llm/` | `LLMProvider` abstraction (`invoke`, `stream`, `model_info`) plus Ollama, OpenAI, Gemini and Groq providers. `create_llm_provider()` picks one from `LLM_PROVIDER`. See [LLM providers](#llm-providers). |
 | `app/container.py` | Composition root: the only place that creates the provider, the agent, the graph, the capabilities and the tool manager. |
-| `app/capabilities/` | Domain features exposed to agents as tools plus usage instructions. `filesystem/`, `code_intelligence/` and `terminal/` so far. See [Filesystem capability](#filesystem-capability), [Code intelligence](#code-intelligence) and [Terminal capability](#terminal-capability). |
+| `app/capabilities/` | Domain features exposed to agents as tools plus usage instructions. `filesystem/`, `code_intelligence/`, `terminal/` and `git/`. See [Filesystem capability](#filesystem-capability), [Code intelligence](#code-intelligence), [Terminal capability](#terminal-capability) and [Git capability](#git-capability). |
 | `app/providers/filesystem/` | The only code that touches the operating system's filesystem. |
 | `app/providers/terminal/` | The only code that starts operating-system processes. |
+| `app/providers/git/` | Talks to the git executable, through the terminal provider. |
 | `app/providers/mcp/` | MCP client side: `transport.py` (stdio, HTTP, SSE, WebSocket), `config.py` (the `mcpServers` file), `registry.py` (known servers), `client.py` (`connect` / `list_tools` / `execute_tool`). |
 | `app/providers/embeddings/`, `vectorstore/` | Embedding and vector store backends for RAG (planned). |
-| `app/services/` | Reserved for future side-effecting services (git, project detection). No LLM code. |
+| `app/services/` | Reserved for future side-effecting services (project detection). No LLM code. |
 | `app/tools/` | Tool system: `interfaces.py` (contracts), `base.py` (`BaseTool`), `registry.py`, `manager.py`, `adapters/` (local, MCP) and `local/echo.py` (demo tool). See [Tool system](#tool-system). |
 | `app/agents/` | One package per agent role. `base/` holds `BaseAgent` (system prompt + injected chat model) and the shared prompt; specialised agents extend it. |
 | `app/orchestration/` | LangGraph engine: `state.py` (graph state), `nodes.py` (node factories), `router.py` (conditional edges), `graph.py` (wiring + composition root), `planner.py` (planned). |
@@ -125,7 +127,7 @@ user ──► graph.invoke / graph.stream({"messages": [HumanMessage]})
           │                                         │
           │      {"messages": [AIMessage(name=…)]} ◄┘   (appended by add_messages)
           │
-   route_after_agent ──► END   (Sprint 7 adds: ──► tools ──► agent)
+   route_after_agent ──► END   (Sprint 8 adds: ──► tools ──► agent)
 ```
 
 - `build_graph(agent)` only wires nodes. It never creates providers or agents; `app/container.py` does.
@@ -142,6 +144,7 @@ user ──► graph.invoke / graph.stream({"messages": [HumanMessage]})
 - **Services hold no LLM logic** and can be tested without a model.
 - **Only `app/providers/filesystem/` touches the OS filesystem** (`os`, `shutil`, `tempfile`...). Enforced by `tests/unit/test_architecture.py`.
 - **Only `app/providers/terminal/` starts processes** (`subprocess`, `asyncio.create_subprocess_*`): the agent never talks to the OS shell. Enforced by `tests/unit/test_architecture.py`.
+- **Git runs only through the Git capability**: only `capabilities/git/` uses `app/providers/git/`, which runs git through the terminal provider; the terminal refuses `git`. Enforced by `tests/unit/test_architecture.py` and the Graphify check in `specs/001-git-capability/`.
 - **Code intelligence is language-independent outside `parsers/`**: no module but a parser imports a parsing library (`ast`...), and code is read only through `FilesystemService`. Enforced by `tests/unit/test_architecture.py`.
 - **Settings are injected.** Constructors take a `Settings` object, which keeps tests hermetic.
 
@@ -171,15 +174,22 @@ All settings are environment variables (see [.env.example](.env.example)). Prece
 | `FS_IGNORED_PATTERNS` | `[".git", ".venv", "node_modules", caches...]` | Skipped by recursive listings |
 | `CODE_MAX_RESULTS` | `50` | Maximum symbols, imports or references returned by one code intelligence query |
 | `TERMINAL_ENABLED` | `true` | Register the terminal tools |
-| `TERMINAL_ALLOWED_COMMANDS` | `["python", "python3", "pytest", "ruff", "mypy", "make", "npm", "node", "composer", "php", "git", "ls", "pwd", "echo"]` | Whitelist of program names (JSON list); `"*"` allows every program that is not denied |
-| `TERMINAL_DENIED_COMMANDS` | `["rm", "sudo", "curl", "ssh", "bash", "sh", "env", "npx", ...]` | Blacklist, always refused, even with `"*"` |
-| `TERMINAL_ALLOWED_SUBCOMMANDS` | git: read-only (`status`, `diff`, `log`...); npm: `install`, `ci`, `test`, `run`...; composer: `install`, `update`, `test`... | JSON object: for these programs the first argument must be listed |
+| `TERMINAL_ALLOWED_COMMANDS` | `["python", "python3", "pytest", "ruff", "mypy", "make", "npm", "node", "composer", "php", "ls", "pwd", "echo"]` | Whitelist of program names (JSON list); `"*"` allows every program that is not denied |
+| `TERMINAL_DENIED_COMMANDS` | `["git", "rm", "sudo", "curl", "ssh", "bash", "sh", "env", "npx", ...]` | Blacklist, always refused, even with `"*"` |
+| `TERMINAL_ALLOWED_SUBCOMMANDS` | npm: `install`, `ci`, `test`, `run`...; composer: `install`, `update`, `test`... | JSON object: for these programs the first argument must be listed |
 | `TERMINAL_DENIED_ARGUMENTS` | `["--exec*", "--upload-pack*", "--output*", ...]` | Arguments refused for every program (fnmatch) |
 | `TERMINAL_DENIED_ENV` | `["PATH", "LD_*", "GIT_*", "PYTHONPATH", "NODE_OPTIONS", ...]` | Variables a command may not set |
 | `TERMINAL_INHERITED_ENV` | `["PATH", "HOME", "USER", "LANG", ...]` | Host variables passed to commands; all others (API keys, tokens) are not |
 | `TERMINAL_DEFAULT_TIMEOUT` / `TERMINAL_MAX_TIMEOUT` | `30` / `50` | Seconds. The max must stay below `TOOL_TIMEOUT` (checked at startup) |
 | `TERMINAL_MAX_OUTPUT_BYTES` | `64000` | Per stream; longer output keeps its beginning and end |
 | `TERMINAL_PYTHON` | `python3` | Interpreter used by `run_python`, `run_pytest` and `run_tests` |
+| `GIT_ENABLED` | `true` | Register the Git tools |
+| `GIT_ALLOW_PUSH` | `false` | `git_push` is offered to the agent only when true (never forced) |
+| `GIT_PROTECTED_BRANCHES` | `[]` | Branches `git_push` refuses, e.g. `["main", "master"]` |
+| `GIT_ALLOW_HOOKS` | `true` | Repository hooks run, like the project's Makefile; `false` disables them |
+| `GIT_TIMEOUT` / `GIT_NETWORK_TIMEOUT` | `30` / `50` | Seconds for local / remote operations; both below `TOOL_TIMEOUT` (checked at startup) |
+| `GIT_MAX_OUTPUT_BYTES` / `GIT_MAX_LOG_ENTRIES` | `64000` / `100` | Diff and show text returned to the agent; commits per log |
+| `GIT_EXECUTABLE` | `git` | |
 | `MCP_CONFIG_PATH` | `mcp_servers.json` | A missing file means no MCP servers |
 
 ---
@@ -408,9 +418,9 @@ Results are capped by `CODE_MAX_RESULTS` (default 50); responses include the `to
 
 ## Terminal capability
 
-Lets the agent **run** things: tests, linters, type checkers, builds, package managers and read-only git commands, so it can check its own changes. Commands run in the filesystem workspace, never through a shell, and go through the tool system like every other tool: the agent never reaches `subprocess`.
+Lets the agent **run** things: tests, linters, type checkers, builds and package managers, so it can check its own changes. Commands run in the filesystem workspace, never through a shell, and go through the tool system like every other tool: the agent never reaches `subprocess`.
 
-Tools: `execute_command`, `run_tests`, `run_python`, `run_pytest`, `run_make`, `run_npm`, `run_composer`, `run_git_command`. Each returns `stdout`, `stderr`, `exit_code`, `succeeded`, `timed_out`, `duration_seconds` and `truncated`. Every tool accepts `working_directory` (relative to the workspace), `timeout` and `env`.
+Tools: `execute_command`, `run_tests`, `run_python`, `run_pytest`, `run_make`, `run_npm`, `run_composer`. Git is not available here: it has its own [capability](#git-capability). Each returns `stdout`, `stderr`, `exit_code`, `succeeded`, `timed_out`, `duration_seconds` and `truncated`. Every tool accepts `working_directory` (relative to the workspace), `timeout` and `env`.
 
 ```
  ToolManager ─► LocalToolAdapter ─► terminal tool                 capabilities/terminal/tool.py
@@ -462,19 +472,129 @@ Tools: `execute_command`, `run_tests`, `run_python`, `run_pytest`, `run_make`, `
 
 - **No shell, ever.** A command line is split with POSIX quoting (`shlex`) and executed as an argument vector. Pipes, redirections, `&&`, `;`, globs and `$VARIABLES` cannot do anything; shell operators are refused with an explanation instead of being passed as arguments.
 - **Whitelist and blacklist.** The program must be a bare name (no `/usr/bin/x`, no `./script`) in `TERMINAL_ALLOWED_COMMANDS`. `TERMINAL_DENIED_COMMANDS` always wins, even over `"*"`. Shells and wrappers (`bash`, `sh`, `env`, `xargs`, `npx`) are blacklisted because they would run a command that skipped these checks.
-- **Subcommands.** git is limited to read-only subcommands (the Git capability comes later), npm and composer to development commands. Options before the subcommand (`git -c core.pager=...`) are refused.
+- **Subcommands.** npm and composer are limited to development commands. Options before the subcommand (`npm --prefix /x test`) are refused. `git` is blacklisted: Git goes through the Git capability.
 - **Dangerous arguments.** `TERMINAL_DENIED_ARGUMENTS` blocks options that run other programs or write files (`--exec`, `--upload-pack`, `--output`...).
 - **Workspace confinement.** The working directory must be inside `FS_WORKSPACE_ROOT`. Path arguments that leave it (absolute paths, `..`) are refused, and so are arguments naming a secret (`FS_DENIED_PATTERNS`), so `python3 .env` fails just like `read_file(".env")`. Both capabilities share the filesystem `PathValidator`: one definition of the workspace.
 - **Clean environment.** Commands receive only `TERMINAL_INHERITED_ENV` from the host, so API keys and tokens in the agent's environment do not leak. Variables that change what runs (`PATH`, `LD_PRELOAD`, `GIT_*`...) cannot be set. `NO_COLOR`, `PAGER=cat` and `GIT_TERMINAL_PROMPT=0` keep commands non-interactive.
 - **Limits.** Timeout per command (max `TERMINAL_MAX_TIMEOUT`, below `TOOL_TIMEOUT`); output capped per stream, keeping the beginning and the end; cancellation and timeout kill child processes too.
 
-**Limits of the model.** These rules prevent mistakes and obvious misuse; they are not a sandbox. An allowed interpreter (`python3 -c ...`, `node -e ...`) or a project script (`make`, `npm run`) can do anything the user running the agent can. For untrusted work, run the agent in a container (Sprint 11), or trim `TERMINAL_ALLOWED_COMMANDS`, or set `TERMINAL_ENABLED=false`.
+**Limits of the model.** These rules prevent mistakes and obvious misuse; they are not a sandbox. An allowed interpreter (`python3 -c ...`, `node -e ...`) or a project script (`make`, `npm run`) can do anything the user running the agent can. For untrusted work, run the agent in a container (Sprint 12), or trim `TERMINAL_ALLOWED_COMMANDS`, or set `TERMINAL_ENABLED=false`.
 
 ### Integration with the next sprints
 
-- **Git capability (Sprint 7)**: a separate capability with its own rules (commit, branch, never force push) built on the same `TerminalProvider`. `run_git_command` stays read-only.
-- **Planner and supervisor (Sprints 8–9)**: they call tools through `ToolManager` like the agent does; per-agent tool allowlists will give the tester `run_tests` and the reviewer read-only tools, without changes here.
+- **Git capability (Sprint 7)**: done. It reuses the same `TerminalProvider`, through `app/providers/git/`, with its own rules (see [Git capability](#git-capability)).
+- **Planner and supervisor (Sprints 9–10)**: they call tools through `ToolManager` like the agent does; per-agent tool allowlists will give the tester `run_tests` and the reviewer read-only tools, without changes here.
 - **MCP**: terminal tools are ordinary `BaseTool`s, so they can be exposed by the agent's own MCP server later, and a remote MCP terminal would sit next to them unchanged.
+
+---
+
+## Git capability
+
+Lets the agent **inspect and change Git repositories** safely: see what changed, save work as commits on a branch, undo its own edits, and keep up to date with remotes. Git is never run directly. Every operation goes through the Tool Manager, is validated, and runs the `git` executable through the terminal provider (no shell, timeout, cancellation).
+
+It was built with the Spec Kit workflow. Spec, plan, research, data model, contracts, tasks and the 7 architecture diagrams are in [specs/001-git-capability/](specs/001-git-capability/), and the design was validated against the Graphify graph of the code before and after implementation ([validation report](specs/001-git-capability/graphify/validation.md)).
+
+| Tool | What it does | Changes the repository |
+|---|---|---|
+| `git_status` | branch, upstream, ahead/behind, staged / modified / untracked / conflicted files | no |
+| `git_diff` | changes of the working copy, the staging area (`staged`), or between commits (`ref`, `target`) | no |
+| `git_log` | recent commits (hash, author, date, subject), optionally for a ref, a range or paths | no |
+| `git_show` | a commit's changes, or a file's content at a commit (`path`) | no |
+| `git_branch` | list branches (`include_remote`), or create one (`create`) | only with `create` |
+| `git_checkout` | switch branch, or create and switch (`create`); never overwrites local changes | yes |
+| `git_add` | stage changed files under `paths`, or `all`; secret files are never staged | yes |
+| `git_commit` | commit the staged changes with a message | yes |
+| `git_restore` | unstage (`staged=true`) or discard the changes of named files | yes |
+| `git_remote` | remotes and URLs, credentials masked | no |
+| `git_fetch` | download from a remote | only `.git` |
+| `git_pull` | fast-forward the current branch; refused when histories diverged | yes |
+| `git_push` | push the current branch; **only registered when `GIT_ALLOW_PUSH=true`**, never forced | remote |
+
+Every tool takes `repository` (default `.`): the repository folder relative to the workspace. Inspection results are structured data (lists of files, commits, branches), so the agent never parses Git's text output.
+
+### Architecture
+
+```
+ ToolManager ─► LocalToolAdapter ─► git tool                   capabilities/git/tool.py
+                                    │  AsyncCapabilityTool: GitError ─► readable tool error
+                                    ▼
+                               GitService                       service.py
+                                    │  workflows: find the repository, read its state when
+                                    │  needed (secrets, conflicts, staged files), build the
+                                    │  git arguments, parse the result
+              ┌─────────────────────┼──────────────────────┐
+              ▼                     ▼                      ▼
+        GitValidator           repository.py          GitProvider            providers/git/
+        validator.py           pure parsers:          (base.py / local.py)
+        policy + every rule    porcelain v2 status,   global flags, non-interactive
+        + final argv guard     log, branches,         environment, hooks switch
+        │                      remotes, URL masking         │
+        ▼                                                   ▼
+  PathValidator (filesystem)                         TerminalProvider       providers/terminal/
+  same workspace and secrets                         the ONLY code starting processes
+                                                            │
+                                                            ▼
+                                                   git executable ─► repository
+```
+
+| Layer | File | Responsibility |
+|---|---|---|
+| Tools | `capabilities/git/tool.py` | One class per tool; `git_tools(service, allow_push=...)` |
+| Schemas | `capabilities/git/schemas.py` | Requests (the tools' JSON Schemas) and structured results |
+| Service | `capabilities/git/service.py` | Business logic and Git workflows. No process or OS code |
+| Repository analysis | `capabilities/git/repository.py` | Pure parsers of machine-readable Git output, URL masking |
+| Validator | `capabilities/git/validator.py` | `GitPolicy`, `GitOperation`, every rule, the final argument guard |
+| Exceptions | `capabilities/git/exceptions.py` | `NotARepository`, `RepositoryOutsideWorkspace`, `InvalidGitArgument`, `GitOperationNotAllowed`, `NothingToCommit`, `ConflictsPresent`, `GitCommandFailed`, `GitNotInstalled`, `GitTimeout` |
+| Prompt | `capabilities/git/prompts.py` | How the agent should use Git (status first, branch per task, stage only what belongs to the change...) |
+| Assembly | `capabilities/git/capability.py` | terminal provider ─► git provider ─► validator ─► service ─► tools |
+| Provider | `providers/git/` | `GitProvider` interface and `LocalGitProvider` (runs git through `TerminalProvider`) |
+
+### Execution flow (example: `git_commit`)
+
+1. The LLM calls `git_commit` with `{"message": "Fix login"}`. `ToolManager` checks the arguments against the input model.
+2. `GitService.commit` checks the operation is allowed (not in a read-only workspace) and validates the message.
+3. The repository folder is resolved by the filesystem `PathValidator`. `git rev-parse --show-toplevel` gives the repository root, which must be inside the workspace.
+4. `git status --porcelain=v2 -z` is parsed. The commit is refused if conflicts remain, if nothing is staged, or if a secret file was staged.
+5. The argument vector `commit --cleanup=strip --message=...` goes through the validator's final guard, then `LocalGitProvider` adds its global flags and hands it to `TerminalProvider`.
+6. The new commit is read back with `git log -1` and returned as a `CommitResult`. Any refusal or Git failure becomes a readable tool error.
+
+### Security model
+
+- **Validated before execution.** Paths stay inside the workspace (and inside the repository), references and branch names follow Git's rules, remotes must exist, messages are checked. Nothing the agent sends can start with `-`, and paths always come after `--`, so an argument is never read as an option. Patterns are literal (`--literal-pathspecs`).
+- **Repository root inside the workspace.** If the workspace is a sub-folder of a bigger repository, operations are refused: they would affect files outside the workspace.
+- **No destructive or history-rewriting operation exists.** There is no reset, clean, rebase, amend, stash, tag, config, init, branch or tag deletion, and no force push. `git_checkout` uses `git switch`, which refuses to overwrite local changes. `git_restore` only discards files named one by one (never `.` or a folder). `git_pull` is `--ff-only`. A final guard rejects any argument vector with a forbidden sub-command or flag (`--force`, `--hard`, `-D`, `--delete`, `--mirror`, `--amend`, `--no-verify`, `+refspec`...), so a bug in the service could not run one either.
+- **Secrets stay invisible**, like in the filesystem capability:
+  - `.env` and keys are hidden from `git_status` (only counted);
+  - they are skipped by `git_add` (even for `.` or a folder) and refused when named;
+  - `git_commit` refuses when one was staged outside the agent;
+  - they are left out of `git_diff` and `git_show`, including old commits.
+- **Push is off by default.** The `git_push` tool does not even exist for the agent until `GIT_ALLOW_PUSH=true`. When enabled, it pushes only the current branch, never forced, never deleting, and refuses `GIT_PROTECTED_BRANCHES`.
+- **Read-only workspace.** `FS_READ_ONLY=true` refuses every Git operation that changes the repository; inspection still works.
+- **No prompts, no leaks.** Git runs without input or terminal (`GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`), so it never waits for a password or an editor. It receives only the allowed host variables: your `HOME` (identity, credential helper) and ssh agent, but not the agent's API keys. Credentials in remote URLs are masked.
+
+**Limits of the model.** Repository hooks are the project's own code and run like its Makefile. Disable them with `GIT_ALLOW_HOOKS=false`. The developer's own Git configuration (identity, credential helpers) applies as usual.
+
+### Examples
+
+```jsonc
+// git_status
+{"repository": {"repository": ".", "branch": "fix/login", "detached": false, "head": "3f2a9c1", "has_commits": true},
+ "upstream": "origin/fix/login", "ahead": 1, "behind": 0,
+ "staged": [{"path": "app/auth.py", "change": "modified", "original_path": null}],
+ "modified": [], "untracked": ["notes.txt"], "conflicted": [],
+ "clean": false, "secrets_hidden": 1, "truncated": false}
+
+// git_add {"all": true}
+{"repository": ".", "staged": ["app/auth.py", "notes.txt"], "skipped_secrets": [".env"]}
+
+// git_commit {"message": "Fix login redirect"}  (nothing staged)
+"Nothing to commit: no staged changes (use git_add first)"
+
+// git_push  (GIT_ALLOW_PUSH=false)
+"Unknown tool 'git_push'. Available: ..."
+```
+
+Run the demo on this repository: `uv run python scripts/test_tools.py`.
 
 ---
 
@@ -495,9 +615,9 @@ MCP is the **main way to add capabilities**. Built-in local tools cover only the
 
 The graph is designed so that going from one agent to several only adds nodes; existing code does not change.
 
-1. **Single agent (Sprints 1–7).** One agent node (`BaseAgent` from `agents/base/`) and, from Sprint 7, a tool node that calls `ToolManager`.
-2. **Plan and execute (Sprint 8).** `planner.py` splits a request into steps, and `router.py` loops through the steps and stops when a step fails.
-3. **Supervisor and specialists (Sprint 9+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, provider or model and tool set. Agents communicate only through the shared graph state (`app/orchestration/state.py`); each reply is tagged with the agent's name.
+1. **Single agent (Sprints 1–8).** One agent node (`BaseAgent` from `agents/base/`) and, from Sprint 8, a tool node that calls `ToolManager`.
+2. **Plan and execute (Sprint 9).** `planner.py` splits a request into steps, and `router.py` loops through the steps and stops when a step fails.
+3. **Supervisor and specialists (Sprint 10+).** The supervisor routes work to the architect, coder, tester and reviewer. Each runs as its own subgraph with its own prompt, provider or model and tool set. Agents communicate only through the shared graph state (`app/orchestration/state.py`); each reply is tagged with the agent's name.
 4. **Review loops.** Tester and reviewer findings send work back to the coder, with a limit on iterations and human-in-the-loop interrupts before destructive actions.
 
 ---
@@ -512,12 +632,13 @@ The graph is designed so that going from one agent to several only adds nodes; e
 | **3** ✅ | Tool system: `BaseTool`, registry, manager, local and MCP adapters, MCP transports, server registry and client (`connect` / `list_tools` / `execute_tool`) |
 | **4** ✅ | Filesystem capability: provider, validator (workspace confinement, secrets, protection, limits), service, 5 tools, usage prompt |
 | **5** ✅ | Code intelligence: parser abstraction, Python parser, analyzer, symbol index, search engine, navigator (definitions, references, hierarchy, dependencies), 10 tools |
-| **6** ✅ | Terminal capability: provider (process groups, timeout, cancellation, bounded output), validator (no shell, whitelist/blacklist, subcommands, workspace, environment), executor, service, 8 tools, usage prompt |
-| **7** | Agent tool loop: tools bound to the LLM, tool node calling `ToolManager`, capability prompts in the system prompt; git capability |
-| **8** | Planner and router; checkpointing (short-term memory) and resumable sessions |
-| **9** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |
-| **10** | RAG over the workspace (embeddings, vector store, code-aware chunking) |
-| **11** | Long-term memory, evaluation harness, Docker packaging, observability |
+| **6** ✅ | Terminal capability: provider (process groups, timeout, cancellation, bounded output), validator (no shell, whitelist/blacklist, subcommands, workspace, environment), executor, service, usage prompt (7 tools; Git moved to its own capability in Sprint 7) |
+| **7** ✅ | Git capability (Spec Kit spec + Graphify-validated design): git provider over the terminal provider, validator (workspace, secrets, names, read-only, argument guard), repository parsers, service, 12 tools + `git_push` when enabled |
+| **8** | Agent tool loop: tools bound to the LLM, tool node calling `ToolManager`, capability prompts in the system prompt |
+| **9** | Planner and router; checkpointing (short-term memory) and resumable sessions |
+| **10** | Multi-agent: supervisor plus architect, coder, tester and reviewer subgraphs |
+| **11** | RAG over the workspace (embeddings, vector store, code-aware chunking) |
+| **12** | Long-term memory, evaluation harness, Docker packaging, observability |
 
 ---
 
@@ -526,6 +647,7 @@ The graph is designed so that going from one agent to several only adds nodes; e
 ```
 app/          application package (see Architecture)
 tests/        pytest suite: unit/, integration/ (real MCP server), fixtures/
+specs/        Spec Kit feature specs (spec, plan, diagrams, tasks, Graphify validation)
 scripts/      developer and maintenance scripts
 docs/         design notes and ADRs
 docker/       container build files

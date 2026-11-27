@@ -1,7 +1,7 @@
 """Composition root: the one place where the application's objects are created and wired.
 
     Settings -> create_llm_provider -> LLMProvider -> BaseAgent -> build_graph -> graph
-    Settings -> capabilities (filesystem, code intelligence, terminal) + MCP tools -> ToolRegistry
+    Settings -> capabilities (filesystem, code intelligence, terminal, git) + MCP tools -> ToolRegistry
              -> ToolManager
 
 Every other module receives its collaborators instead of building them, so swapping a
@@ -17,11 +17,13 @@ from app.capabilities.code_intelligence import (
     build_code_intelligence_service,
 )
 from app.capabilities.filesystem import build_filesystem_capability, build_filesystem_service
+from app.capabilities.git import build_git_capability, build_git_service
 from app.capabilities.terminal import build_terminal_capability, build_terminal_service
 from app.config import Settings, get_settings
 from app.orchestration import AgentGraph, build_graph
 from app.providers.llm import LLMProvider, create_llm_provider
 from app.providers.mcp import MCPClient, MCPServerRegistry, SessionMCPClient
+from app.providers.terminal import LocalTerminalProvider
 from app.tools import BaseTool, ToolManager, ToolRegistry
 from app.tools.adapters import LocalToolAdapter, load_mcp_tools
 
@@ -39,17 +41,22 @@ def build_application(settings: Settings | None = None) -> AgentGraph:
 def build_capabilities(settings: Settings) -> list[Capability]:
     """Capabilities offered to agents. Each new capability is added to this list.
 
-    The filesystem service is shared: code intelligence reads the project through it, under the
-    same safety rules as the file tools.
+    The filesystem service is shared: code intelligence reads the project through it, and the
+    terminal and git capabilities use its validator, so every capability has the same workspace
+    and the same secrets. Terminal commands and git run through one process provider.
     """
     files = build_filesystem_service(settings)
+    processes = LocalTerminalProvider()
     capabilities = [
         build_filesystem_capability(files),
         build_code_intelligence_capability(build_code_intelligence_service(settings, files)),
     ]
     if settings.terminal_enabled:
-        # Same workspace rules as the file tools: commands run inside it and cannot name secrets.
-        capabilities.append(build_terminal_capability(build_terminal_service(settings, files.validator)))
+        terminal = build_terminal_service(settings, files.validator, processes)
+        capabilities.append(build_terminal_capability(terminal))
+    if settings.git_enabled:
+        git = build_git_service(settings, files.validator, terminal=processes)
+        capabilities.append(build_git_capability(git, allow_push=settings.git_allow_push))
     return capabilities
 
 

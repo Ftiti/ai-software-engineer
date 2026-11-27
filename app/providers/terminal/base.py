@@ -33,6 +33,15 @@ class StreamOutput:
     def truncated(self) -> bool:
         return self.total_bytes > len(self.head) + len(self.tail)
 
+    def text(self) -> str:
+        """Decoded UTF-8 text (invalid bytes replaced), with a marker where the middle was cut."""
+        head = self.head.decode("utf-8", errors="replace")
+        tail = self.tail.decode("utf-8", errors="replace")
+        if not self.truncated:
+            return head + tail
+        omitted = self.total_bytes - len(self.head) - len(self.tail)
+        return f"{head}\n[... {omitted} bytes omitted ...]\n{tail}"
+
 
 @dataclass(frozen=True, slots=True)
 class ProcessResult:

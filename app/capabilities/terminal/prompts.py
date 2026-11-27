@@ -9,8 +9,8 @@ you give a working_directory (relative to the root).
 
 How to work:
 - Prefer the dedicated tools: run_tests to check your changes, run_pytest / run_npm / \
-run_composer / run_make / run_python for one tool, run_git_command to inspect history. Use \
-execute_command for other allowed programs (linters, formatters, type checkers).
+run_composer / run_make / run_python for one tool. Use execute_command for other allowed \
+programs (linters, formatters, type checkers). Git has its own tools (git_*), not the terminal.
 - Read files with the filesystem tools, not with commands.
 - Commands run without a shell: one program per call, no pipes, redirections, '&&', globs \
 or $VARIABLES. Pass variables with the env argument.
